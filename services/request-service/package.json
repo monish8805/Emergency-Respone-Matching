@@ -1,0 +1,10 @@
+{
+  "name": "request-service",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@emergency/shared": "*",
+    "zod": "^3.23.8",
+    "express": "^5.1.0"
+  }
+}
