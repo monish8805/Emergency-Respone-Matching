@@ -1,0 +1,69 @@
+x-storage-build: &storage-build
+  build:
+    context: .
+    dockerfile: services/storage-node/Dockerfile
+
+services:
+  rabbitmq:
+    image: rabbitmq:3.13-management
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+
+  coordinator:
+    build:
+      context: .
+      dockerfile: services/coordinator/Dockerfile
+    environment:
+      PORT: "3006"
+      HEARTBEAT_TIMEOUT_MS: "6000"
+      STORAGE_NODES: '[{"id":"s0-primary","shard":0,"url":"http://storage-s0-primary:4000"},{"id":"s0-replica","shard":0,"url":"http://storage-s0-replica:4000"},{"id":"s1-primary","shard":1,"url":"http://storage-s1-primary:4000"},{"id":"s1-replica","shard":1,"url":"http://storage-s1-replica:4000"},{"id":"s2-primary","shard":2,"url":"http://storage-s2-primary:4000"},{"id":"s2-replica","shard":2,"url":"http://storage-s2-replica:4000"}]'
+    ports:
+      - "3006:3006"
+
+  storage-s0-primary:
+    <<: *storage-build
+    environment: { NODE_ID: s0-primary, SHARD: "0", PORT: "4000", COORDINATOR_URL: "http://coordinator:3006" }
+    depends_on: [coordinator]
+  storage-s0-replica:
+    <<: *storage-build
+    environment: { NODE_ID: s0-replica, SHARD: "0", PORT: "4000", COORDINATOR_URL: "http://coordinator:3006" }
+    depends_on: [coordinator]
+  storage-s1-primary:
+    <<: *storage-build
+    environment: { NODE_ID: s1-primary, SHARD: "1", PORT: "4000", COORDINATOR_URL: "http://coordinator:3006" }
+    depends_on: [coordinator]
+  storage-s1-replica:
+    <<: *storage-build
+    environment: { NODE_ID: s1-replica, SHARD: "1", PORT: "4000", COORDINATOR_URL: "http://coordinator:3006" }
+    depends_on: [coordinator]
+  storage-s2-primary:
+    <<: *storage-build
+    environment: { NODE_ID: s2-primary, SHARD: "2", PORT: "4000", COORDINATOR_URL: "http://coordinator:3006" }
+    depends_on: [coordinator]
+  storage-s2-replica:
+    <<: *storage-build
+    environment: { NODE_ID: s2-replica, SHARD: "2", PORT: "4000", COORDINATOR_URL: "http://coordinator:3006" }
+    depends_on: [coordinator]
+
+  request-service:
+    build:
+      context: .
+      dockerfile: services/request-service/Dockerfile
+    environment:
+      PORT: "3005"
+      COORDINATOR_URL: "http://coordinator:3006"
+      RABBITMQ_URL: "amqp://rabbitmq:5672"
+    ports:
+      - "3005:3005"
+    depends_on: [coordinator, rabbitmq]
+
+  matching-service:
+    build:
+      context: .
+      dockerfile: services/matching-service/Dockerfile
+    environment:
+      PORT: "3007"
+      COORDINATOR_URL: "http://coordinator:3006"
+      RABBITMQ_URL: "amqp://rabbitmq:5672"
+    depends_on: [coordinator, rabbitmq]
