@@ -1,16 +1,39 @@
-x-storage-build: &storage-build
+# Shared settings. Healthchecks use wget, which ships with the alpine images.
+x-service: &service
+  restart: unless-stopped
+
+x-storage: &storage
+  <<: *service
   build:
     context: .
     dockerfile: services/storage-node/Dockerfile
+  depends_on:
+    coordinator:
+      condition: service_healthy
+  healthcheck:
+    test: ["CMD", "wget", "-qO-", "http://localhost:4000/health"]
+    interval: 3s
+    timeout: 2s
+    retries: 10
 
 services:
   rabbitmq:
+    <<: *service
     image: rabbitmq:3.13-management
     ports:
-      - "5672:5672"
-      - "15672:15672"
+      # Bound to localhost only: the broker is not for the outside network.
+      - "127.0.0.1:5672:5672"
+      - "127.0.0.1:15672:15672"
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq   # queued jobs survive a broker restart
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 10s
+      retries: 20
 
   coordinator:
+    <<: *service
     build:
       context: .
       dockerfile: services/coordinator/Dockerfile
@@ -19,34 +42,82 @@ services:
       HEARTBEAT_TIMEOUT_MS: "6000"
       STORAGE_NODES: '[{"id":"s0-primary","shard":0,"url":"http://storage-s0-primary:4000"},{"id":"s0-replica","shard":0,"url":"http://storage-s0-replica:4000"},{"id":"s1-primary","shard":1,"url":"http://storage-s1-primary:4000"},{"id":"s1-replica","shard":1,"url":"http://storage-s1-replica:4000"},{"id":"s2-primary","shard":2,"url":"http://storage-s2-primary:4000"},{"id":"s2-replica","shard":2,"url":"http://storage-s2-replica:4000"}]'
     ports:
-      - "3006:3006"
+      # Localhost only: /internal/* is for the services, never for the public network.
+      - "127.0.0.1:3006:3006"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3006/health"]
+      interval: 3s
+      timeout: 2s
+      retries: 10
 
   storage-s0-primary:
-    <<: *storage-build
-    environment: { NODE_ID: s0-primary, SHARD: "0", PORT: "4000", COORDINATOR_URL: "http://coordinator:3006" }
-    depends_on: [coordinator]
+    <<: *storage
+    environment:
+      NODE_ID: s0-primary
+      SHARD: "0"
+      PORT: "4000"
+      COORDINATOR_URL: "http://coordinator:3006"
+      DATA_DIR: /data
+    volumes:
+      - data-s0-primary:/data
+
   storage-s0-replica:
-    <<: *storage-build
-    environment: { NODE_ID: s0-replica, SHARD: "0", PORT: "4000", COORDINATOR_URL: "http://coordinator:3006" }
-    depends_on: [coordinator]
+    <<: *storage
+    environment:
+      NODE_ID: s0-replica
+      SHARD: "0"
+      PORT: "4000"
+      COORDINATOR_URL: "http://coordinator:3006"
+      DATA_DIR: /data
+    volumes:
+      - data-s0-replica:/data
+
   storage-s1-primary:
-    <<: *storage-build
-    environment: { NODE_ID: s1-primary, SHARD: "1", PORT: "4000", COORDINATOR_URL: "http://coordinator:3006" }
-    depends_on: [coordinator]
+    <<: *storage
+    environment:
+      NODE_ID: s1-primary
+      SHARD: "1"
+      PORT: "4000"
+      COORDINATOR_URL: "http://coordinator:3006"
+      DATA_DIR: /data
+    volumes:
+      - data-s1-primary:/data
+
   storage-s1-replica:
-    <<: *storage-build
-    environment: { NODE_ID: s1-replica, SHARD: "1", PORT: "4000", COORDINATOR_URL: "http://coordinator:3006" }
-    depends_on: [coordinator]
+    <<: *storage
+    environment:
+      NODE_ID: s1-replica
+      SHARD: "1"
+      PORT: "4000"
+      COORDINATOR_URL: "http://coordinator:3006"
+      DATA_DIR: /data
+    volumes:
+      - data-s1-replica:/data
+
   storage-s2-primary:
-    <<: *storage-build
-    environment: { NODE_ID: s2-primary, SHARD: "2", PORT: "4000", COORDINATOR_URL: "http://coordinator:3006" }
-    depends_on: [coordinator]
+    <<: *storage
+    environment:
+      NODE_ID: s2-primary
+      SHARD: "2"
+      PORT: "4000"
+      COORDINATOR_URL: "http://coordinator:3006"
+      DATA_DIR: /data
+    volumes:
+      - data-s2-primary:/data
+
   storage-s2-replica:
-    <<: *storage-build
-    environment: { NODE_ID: s2-replica, SHARD: "2", PORT: "4000", COORDINATOR_URL: "http://coordinator:3006" }
-    depends_on: [coordinator]
+    <<: *storage
+    environment:
+      NODE_ID: s2-replica
+      SHARD: "2"
+      PORT: "4000"
+      COORDINATOR_URL: "http://coordinator:3006"
+      DATA_DIR: /data
+    volumes:
+      - data-s2-replica:/data
 
   request-service:
+    <<: *service
     build:
       context: .
       dockerfile: services/request-service/Dockerfile
@@ -56,9 +127,19 @@ services:
       RABBITMQ_URL: "amqp://rabbitmq:5672"
     ports:
       - "3005:3005"
-    depends_on: [coordinator, rabbitmq]
+    depends_on:
+      coordinator:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3005/health"]
+      interval: 3s
+      timeout: 2s
+      retries: 10
 
   matching-service:
+    <<: *service
     build:
       context: .
       dockerfile: services/matching-service/Dockerfile
@@ -66,13 +147,37 @@ services:
       PORT: "3007"
       COORDINATOR_URL: "http://coordinator:3006"
       RABBITMQ_URL: "amqp://rabbitmq:5672"
-    depends_on: [coordinator, rabbitmq]
+      # Coordinates match within this distance; zone names match exactly.
+      MATCH_RADIUS_KM: "${MATCH_RADIUS_KM:-5}"
+    depends_on:
+      coordinator:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3007/health"]
+      interval: 3s
+      timeout: 2s
+      retries: 10
 
   web:
+    <<: *service
     build:
       context: web
     environment:
       API_URL: "http://request-service:3005"
     ports:
-      - "3000:3000"
-    depends_on: [request-service]
+      # Set WEB_PORT if 3000 is already taken on your machine.
+      - "${WEB_PORT:-3000}:3000"
+    depends_on:
+      request-service:
+        condition: service_healthy
+
+volumes:
+  rabbitmq-data:
+  data-s0-primary:
+  data-s0-replica:
+  data-s1-primary:
+  data-s1-replica:
+  data-s2-primary:
+  data-s2-replica:
