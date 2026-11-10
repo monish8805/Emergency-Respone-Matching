@@ -11,10 +11,10 @@ kubectl apply -f k8s/
 kubectl -n emergency rollout restart deployment coordinator request-service matching-service web
 kubectl -n emergency rollout restart statefulset storage-s0 storage-s1 storage-s2
 
-for d in rabbitmq coordinator request-service matching-service web; do
+for d in coordinator request-service matching-service web; do
   kubectl -n emergency rollout status deployment/$d --timeout=180s
 done
-for s in storage-s0 storage-s1 storage-s2; do
+for s in rabbitmq storage-s0 storage-s1 storage-s2; do
   kubectl -n emergency rollout status statefulset/$s --timeout=180s
 done
 

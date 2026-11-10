@@ -4,8 +4,10 @@ metadata:
   name: coordinator
   namespace: emergency
 spec:
-  # One replica: the node registry (heartbeats) lives in this process's memory.
+  # One replica on purpose: it serializes writes per key and tracks node health in memory.
   replicas: 1
+  strategy:
+    type: Recreate   # never run two coordinators side by side during a rollout
   selector:
     matchLabels: {app: coordinator}
   template:
@@ -18,22 +20,30 @@ spec:
           imagePullPolicy: Never
           env:
             - {name: PORT, value: "3006"}
-            - {name: HEARTBEAT_TIMEOUT_MS, value: "6000"}
-            - name: STORAGE_NODES
-              value: '[{"id":"storage-s0-0","shard":0,"url":"http://storage-s0-0.storage-s0:4000"},{"id":"storage-s0-1","shard":0,"url":"http://storage-s0-1.storage-s0:4000"},{"id":"storage-s1-0","shard":1,"url":"http://storage-s1-0.storage-s1:4000"},{"id":"storage-s1-1","shard":1,"url":"http://storage-s1-1.storage-s1:4000"},{"id":"storage-s2-0","shard":2,"url":"http://storage-s2-0.storage-s2:4000"},{"id":"storage-s2-1","shard":2,"url":"http://storage-s2-1.storage-s2:4000"}]'
+          envFrom:
+            - configMapRef: {name: app-config}
           ports:
             - {containerPort: 3006}
           readinessProbe:
             httpGet: {path: /health, port: 3006}
             periodSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: {path: /health, port: 3006}
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            failureThreshold: 3
+          resources:
+            requests: {cpu: 50m, memory: 96Mi}
+            limits: {memory: 256Mi}
 ---
+# ClusterIP only: /internal/* is reachable from inside the cluster, never from outside.
 apiVersion: v1
 kind: Service
 metadata:
   name: coordinator
   namespace: emergency
 spec:
-  type: NodePort
   selector: {app: coordinator}
   ports:
-    - {port: 3006, targetPort: 3006, nodePort: 30006}
+    - {port: 3006, targetPort: 3006}

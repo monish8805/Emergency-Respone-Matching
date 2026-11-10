@@ -35,12 +35,32 @@ spec:
               valueFrom: {fieldRef: {fieldPath: metadata.name}}
             - {name: SHARD, value: "0"}
             - {name: PORT, value: "4000"}
-            - {name: COORDINATOR_URL, value: "http://coordinator:3006"}
+            - {name: DATA_DIR, value: /data}
+            - name: COORDINATOR_URL
+              valueFrom: {configMapKeyRef: {name: app-config, key: COORDINATOR_URL}}
           ports:
             - {containerPort: 4000}
           readinessProbe:
             httpGet: {path: /health, port: 4000}
             periodSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: {path: /health, port: 4000}
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            failureThreshold: 3
+          resources:
+            requests: {cpu: 50m, memory: 96Mi}
+            limits: {memory: 256Mi}
+          volumeMounts:
+            - {name: data, mountPath: /data}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests: {storage: 256Mi}
 ---
 apiVersion: v1
 kind: Service
@@ -79,12 +99,32 @@ spec:
               valueFrom: {fieldRef: {fieldPath: metadata.name}}
             - {name: SHARD, value: "1"}
             - {name: PORT, value: "4000"}
-            - {name: COORDINATOR_URL, value: "http://coordinator:3006"}
+            - {name: DATA_DIR, value: /data}
+            - name: COORDINATOR_URL
+              valueFrom: {configMapKeyRef: {name: app-config, key: COORDINATOR_URL}}
           ports:
             - {containerPort: 4000}
           readinessProbe:
             httpGet: {path: /health, port: 4000}
             periodSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: {path: /health, port: 4000}
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            failureThreshold: 3
+          resources:
+            requests: {cpu: 50m, memory: 96Mi}
+            limits: {memory: 256Mi}
+          volumeMounts:
+            - {name: data, mountPath: /data}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests: {storage: 256Mi}
 ---
 apiVersion: v1
 kind: Service
@@ -123,9 +163,29 @@ spec:
               valueFrom: {fieldRef: {fieldPath: metadata.name}}
             - {name: SHARD, value: "2"}
             - {name: PORT, value: "4000"}
-            - {name: COORDINATOR_URL, value: "http://coordinator:3006"}
+            - {name: DATA_DIR, value: /data}
+            - name: COORDINATOR_URL
+              valueFrom: {configMapKeyRef: {name: app-config, key: COORDINATOR_URL}}
           ports:
             - {containerPort: 4000}
           readinessProbe:
             httpGet: {path: /health, port: 4000}
             periodSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: {path: /health, port: 4000}
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            failureThreshold: 3
+          resources:
+            requests: {cpu: 50m, memory: 96Mi}
+            limits: {memory: 256Mi}
+          volumeMounts:
+            - {name: data, mountPath: /data}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests: {storage: 256Mi}
