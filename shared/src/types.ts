@@ -23,6 +23,8 @@ export interface Resource {
   location: string;
   availability: boolean;
   status: ResourceStatus;
+  // Set while the resource is claimed, so a half-finished assignment can be completed or undone.
+  assignedRequestId?: string | null;
 }
 
 export interface NodeConfig {
