@@ -34,6 +34,16 @@ Stop a storage node (`docker compose stop storage-s0-primary`) to see reads serv
 cd web && npm install && npm run dev   # http://localhost:3000, calls the request service at API_URL (default http://localhost:3005)
 ```
 
+## Kubernetes (minikube)
+
+```bash
+./scripts/deploy-k8s.sh              # start minikube, build images, deploy, wait until ready
+minikube service web -n emergency    # open the UI
+node scripts/e2e.mjs                 # run the end-to-end tests (see docs/DEMO.md for the demo script)
+```
+
+Storage runs as three StatefulSets (one per shard, two pods each). Request and matching services are Deployments and can be scaled with `kubectl scale`.
+
 ## Tests
 
 ```bash
