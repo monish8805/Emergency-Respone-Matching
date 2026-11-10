@@ -29,6 +29,15 @@ describe("request service", () => {
     expect(fetched.body.location).toBe("Zone A");
   });
 
+  it("lists requests newest first", async () => {
+    const { app } = setup();
+    const first = await request(app).post("/requests").send({ type: "water", location: "A" }).expect(201);
+    await new Promise((r) => setTimeout(r, 5));
+    const second = await request(app).post("/requests").send({ type: "food", location: "B" }).expect(201);
+    const list = await request(app).get("/requests").expect(200);
+    expect(list.body.map((r: { id: string }) => r.id)).toEqual([second.body.id, first.body.id]);
+  });
+
   it("rejects an invalid request type with 400", async () => {
     const { app } = setup();
     await request(app).post("/requests").send({ type: "gold", location: "Zone A" }).expect(400);

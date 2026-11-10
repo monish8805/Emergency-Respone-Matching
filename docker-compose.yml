@@ -67,3 +67,12 @@ services:
       COORDINATOR_URL: "http://coordinator:3006"
       RABBITMQ_URL: "amqp://rabbitmq:5672"
     depends_on: [coordinator, rabbitmq]
+
+  web:
+    build:
+      context: web
+    environment:
+      API_URL: "http://request-service:3005"
+    ports:
+      - "3000:3000"
+    depends_on: [request-service]

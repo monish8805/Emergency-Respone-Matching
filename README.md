@@ -4,6 +4,7 @@ A containerized, Kubernetes-ready system that matches emergency requests (water,
 
 ## Architecture
 
+- **Web UI** (port 3000): TanStack Start + TanStack Query frontend to create requests, register resources, view both, update statuses and trigger matching. Its server functions call the Request Service (`API_URL`).
 - **Request Service** (port 3005): REST API for requests and resources. Publishes match jobs to RabbitMQ.
 - **Matching Service**: Consumes match jobs from RabbitMQ and assigns resources.
 - **Coordinator** (port 3006): Routes storage operations with `hash(key) mod 3`. Writes to primary and replica. Tracks heartbeats and resyncs recovered nodes.
@@ -17,7 +18,7 @@ npm install
 docker compose up --build
 ```
 
-Try it:
+Open the UI at http://localhost:3000, or try the API directly:
 
 ```bash
 curl -X POST localhost:3005/resources -H 'content-type: application/json' -d '{"type":"water","location":"Zone A"}'
@@ -26,6 +27,12 @@ curl localhost:3005/requests/<id>
 ```
 
 Stop a storage node (`docker compose stop storage-s0-primary`) to see reads served by its replica. Start it again to see it resync.
+
+## Web UI development
+
+```bash
+cd web && npm install && npm run dev   # http://localhost:3000, calls the request service at API_URL (default http://localhost:3005)
+```
 
 ## Tests
 

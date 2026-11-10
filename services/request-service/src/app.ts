@@ -7,6 +7,7 @@ import {
   requestStatusSchema,
   resourceKey,
   resourceStatusSchema,
+  REQUEST_PREFIX,
   RESOURCE_PREFIX,
   StoreUnavailableError,
   type EmergencyRequest,
@@ -46,6 +47,12 @@ export function createRequestApp({ store, publishMatch }: RequestAppDeps) {
       return;
     }
     res.status(201).json(record);
+  });
+
+  app.get("/requests", async (_req, res) => {
+    const entries = await store.list<EmergencyRequest>(REQUEST_PREFIX);
+    const requests = entries.map((e) => e.value).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+    res.json(requests);
   });
 
   app.get("/requests/:id", async (req, res) => {
