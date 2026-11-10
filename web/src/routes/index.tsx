@@ -6,6 +6,7 @@ import {
   RESOURCE_STATUSES,
   RESOURCE_TYPES,
   createRequest,
+  getSystem,
   listRequests,
   listResources,
   registerResource,
@@ -15,6 +16,7 @@ import {
   type RequestStatus,
   type ResourceStatus,
   type ResourceType,
+  type SystemStatus,
 } from "../api";
 
 export const Route = createFileRoute("/")({ component: Home });
@@ -27,6 +29,7 @@ function Home() {
 
   const requests = useQuery({ queryKey: ["requests"], queryFn: () => listRequests(), refetchInterval: POLL_MS });
   const resources = useQuery({ queryKey: ["resources"], queryFn: () => listResources(), refetchInterval: POLL_MS });
+  const system = useQuery({ queryKey: ["system"], queryFn: () => getSystem(), refetchInterval: POLL_MS, retry: false });
 
   // Every mutation refreshes both lists, since matching changes both.
   const options = (message?: string) => ({
@@ -43,6 +46,7 @@ function Home() {
   const updateResource = useMutation({ mutationFn: setResourceStatus, ...options() });
   const match = useMutation({ mutationFn: triggerMatch, ...options("Match queued") });
 
+  // The health panel reports its own failures, so they do not also show up as a banner.
   const error = [requests, resources, submitRequest, submitResource, updateRequest, updateResource, match]
     .map((q) => q.error)
     .find(Boolean);
@@ -59,6 +63,7 @@ function Home() {
   return (
     <main>
       <h1>Emergency Response Matching</h1>
+      <HealthPanel status={system.data} error={system.error?.message} loading={system.isPending} />
       {error && <div className="banner error">{error.message}</div>}
       {notice && !error && <div className="banner ok">{notice}</div>}
 
@@ -101,7 +106,10 @@ function Home() {
                     onChange={(s) => updateRequest.mutate({ data: { id: r.id, status: s as RequestStatus } })}
                   />
                 </td>
-                <td>{resourceLabel(r.resourceId)}</td>
+                <td>
+                  {resourceLabel(r.resourceId)}
+                  {r.resourceId && r.distanceKm != null && <small className="muted"> · {r.distanceKm} km away</small>}
+                </td>
                 <td>{new Date(r.createdAt).toLocaleString()}</td>
                 <td>
                   {r.status === "PENDING" && (
@@ -154,6 +162,58 @@ function Home() {
   );
 }
 
+function HealthPanel({
+  status,
+  error,
+  loading,
+}: {
+  status?: SystemStatus;
+  error?: string;
+  loading: boolean;
+}) {
+  if (loading) return <div className="health muted">Checking services…</div>;
+  if (error || !status) {
+    return (
+      <div className="health">
+        <Chip label="Request service" state="down" detail={error ?? "unreachable"} />
+      </div>
+    );
+  }
+  const nodes = status.coordinator.nodes ?? [];
+  return (
+    <div className="health">
+      <Chip label="Request service" state={status.requestService === "up" ? "up" : "down"} />
+      <Chip label="RabbitMQ" state={status.rabbitmq === "up" ? "up" : status.rabbitmq === "down" ? "down" : "unknown"} />
+      <Chip
+        label="Coordinator"
+        state={status.coordinator.reachable ? "up" : "down"}
+        detail={status.coordinator.reachable ? undefined : status.coordinator.error}
+      />
+      {(status.coordinator.shards ?? []).map((sh) => (
+        <Chip
+          key={sh.shard}
+          label={`Shard ${sh.shard}`}
+          state={sh.live === sh.total ? "up" : sh.live > 0 ? "degraded" : "down"}
+          detail={`${sh.live}/${sh.total} nodes${nodes
+            .filter((n) => n.shard === sh.shard && n.status !== "up")
+            .map((n) => ` · ${n.id} ${n.status}`)
+            .join("")}`}
+        />
+      ))}
+    </div>
+  );
+}
+
+function Chip({ label, state, detail }: { label: string; state: "up" | "down" | "degraded" | "unknown"; detail?: string }) {
+  return (
+    <span className={`chip ${state}`} title={detail}>
+      <span className="dot" />
+      {label}
+      {detail && <small>{detail}</small>}
+    </span>
+  );
+}
+
 function StatusSelect({
   value,
   options,
@@ -203,7 +263,8 @@ function RequestForm({
       </label>
       <label>
         Location
-        <input value={location} onChange={(e) => setLocation(e.target.value)} placeholder="12.97, 77.59" required />
+        <input value={location} onChange={(e) => setLocation(e.target.value)} placeholder="Zone A  or  12.97, 77.59" required />
+        <small className="hint">A zone name, or latitude, longitude. Coordinates match resources within a few km.</small>
       </label>
       <label>
         Details
@@ -247,7 +308,8 @@ function ResourceForm({
       </label>
       <label>
         Location
-        <input value={location} onChange={(e) => setLocation(e.target.value)} placeholder="12.97, 77.59" required />
+        <input value={location} onChange={(e) => setLocation(e.target.value)} placeholder="Zone A  or  12.97, 77.59" required />
+        <small className="hint">A zone name, or latitude, longitude. A zone name only matches the same zone.</small>
       </label>
       <label className="check">
         <input type="checkbox" checked={availability} onChange={(e) => setAvailability(e.target.checked)} />

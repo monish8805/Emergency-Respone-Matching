@@ -26,3 +26,15 @@ select.PENDING, select.UNAVAILABLE { background: #fff4e0; }
 select.ASSIGNED, select.IN_PROGRESS { background: #e3f0fd; }
 select.COMPLETED, select.AVAILABLE { background: #e6f4ea; }
 select.CANCELLED { background: #eee; }
+
+.health { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }
+.health.muted { color: #65676b; font-size: .85rem; }
+.chip { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 999px; background: #fff; font-size: .8rem; font-weight: 600; box-shadow: 0 1px 2px rgba(0,0,0,.1); }
+.chip small { font-weight: 400; color: #65676b; }
+.chip .dot { width: 8px; height: 8px; border-radius: 50%; background: #9aa0a6; }
+.chip.up .dot { background: #2e7d32; }
+.chip.degraded .dot { background: #ef6c00; }
+.chip.down .dot { background: #c62828; }
+
+.hint { display: block; margin-top: 4px; font-weight: 400; font-size: .75rem; color: #65676b; }
+.muted { color: #65676b; }
