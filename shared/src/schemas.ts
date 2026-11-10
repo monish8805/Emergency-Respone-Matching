@@ -20,3 +20,7 @@ export const registerResourceSchema = z.object({
 export const resourceStatusSchema = z.object({
   status: z.enum(RESOURCE_STATUSES),
 });
+
+export const matchMessageSchema = z.object({
+  requestId: z.string().min(1),
+});

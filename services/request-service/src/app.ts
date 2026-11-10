@@ -10,6 +10,8 @@ import {
   REQUEST_PREFIX,
   RESOURCE_PREFIX,
   StoreUnavailableError,
+  UpdateConflictError,
+  updateRecord,
   type EmergencyRequest,
   type KeyValueStore,
   type Resource,
@@ -19,14 +21,21 @@ import type { ZodError } from "zod";
 export interface RequestAppDeps {
   store: KeyValueStore;
   publishMatch: (requestId: string) => Promise<void>;
+  // Optional probes used by GET /system. When absent the component is reported as "unknown".
+  checkRabbit?: () => Promise<boolean>;
+  coordinatorHealth?: () => Promise<unknown>;
 }
 
-export function createRequestApp({ store, publishMatch }: RequestAppDeps) {
+export function createRequestApp({ store, publishMatch, checkRabbit, coordinatorHealth }: RequestAppDeps) {
   const app = express();
   app.use(express.json({ limit: "100kb" }));
 
   const invalid = (res: express.Response, error: ZodError) =>
     res.status(400).json({ error: "invalid request", details: error.flatten() });
+
+  app.get("/", (_req, res) =>
+    res.json({ service: "request-service", health: "/health", system: "/system", docs: "see README" }),
+  );
 
   app.post("/requests", async (req, res) => {
     const parsed = createRequestSchema.safeParse(req.body);
@@ -42,9 +51,11 @@ export function createRequestApp({ store, publishMatch }: RequestAppDeps) {
     await store.put(requestKey(record.id), record);
     try {
       await publishMatch(record.id);
-    } catch {
-      res.status(503).json({ error: "message queue unavailable", requestId: record.id });
-      return;
+    } catch (err) {
+      // The request is safely stored as PENDING. The matching service re-queues stuck
+      // PENDING requests, so it is matched once RabbitMQ is back. Tell the caller.
+      console.error(`could not queue request ${record.id}, the sweeper will retry: ${String(err)}`);
+      res.set("x-match-queued", "false");
     }
     res.status(201).json(record);
   });
@@ -64,11 +75,20 @@ export function createRequestApp({ store, publishMatch }: RequestAppDeps) {
   app.put("/requests/:id/status", async (req, res) => {
     const parsed = requestStatusSchema.safeParse(req.body);
     if (!parsed.success) return invalid(res, parsed.error);
-    const record = await store.get<EmergencyRequest>(requestKey(req.params.id));
-    if (!record) return res.status(404).json({ error: "request not found" });
-    record.status = parsed.data.status;
-    await store.put(requestKey(record.id), record);
-    res.json(record);
+    const updated = await updateRecord<EmergencyRequest>(store, requestKey(req.params.id), (r) =>
+      r.status === parsed.data.status ? r : { ...r, status: parsed.data.status },
+    );
+    if (!updated) return res.status(404).json({ error: "request not found" });
+
+    // A finished or cancelled request gives its resource back.
+    if ((updated.status === "CANCELLED" || updated.status === "COMPLETED") && updated.resourceId) {
+      await updateRecord<Resource>(store, resourceKey(updated.resourceId), (r) =>
+        r.assignedRequestId === updated.id
+          ? { ...r, status: "AVAILABLE", availability: true, assignedRequestId: null }
+          : r,
+      );
+    }
+    res.json(updated);
   });
 
   app.post("/resources", async (req, res) => {
@@ -80,6 +100,7 @@ export function createRequestApp({ store, publishMatch }: RequestAppDeps) {
       ...rest,
       availability,
       status: availability ? "AVAILABLE" : "UNAVAILABLE",
+      assignedRequestId: null,
     };
     await store.put(resourceKey(record.id), record);
     res.status(201).json(record);
@@ -93,12 +114,14 @@ export function createRequestApp({ store, publishMatch }: RequestAppDeps) {
   app.put("/resources/:id/status", async (req, res) => {
     const parsed = resourceStatusSchema.safeParse(req.body);
     if (!parsed.success) return invalid(res, parsed.error);
-    const record = await store.get<Resource>(resourceKey(req.params.id));
-    if (!record) return res.status(404).json({ error: "resource not found" });
-    record.status = parsed.data.status;
-    record.availability = parsed.data.status === "AVAILABLE";
-    await store.put(resourceKey(record.id), record);
-    res.json(record);
+    const updated = await updateRecord<Resource>(store, resourceKey(req.params.id), (r) => ({
+      ...r,
+      status: parsed.data.status,
+      availability: parsed.data.status === "AVAILABLE",
+      assignedRequestId: parsed.data.status === "ASSIGNED" ? r.assignedRequestId ?? null : null,
+    }));
+    if (!updated) return res.status(404).json({ error: "resource not found" });
+    res.json(updated);
   });
 
   app.post("/match/:requestId", async (req, res) => {
@@ -109,17 +132,41 @@ export function createRequestApp({ store, publishMatch }: RequestAppDeps) {
     }
     try {
       await publishMatch(record.id);
-    } catch {
+    } catch (err) {
+      console.error(`could not queue match for ${record.id}: ${String(err)}`);
       return res.status(503).json({ error: "message queue unavailable" });
     }
     res.json({ requestId: record.id, queued: true });
   });
 
+  // Liveness: the process is up. Does not depend on other services.
   app.get("/health", (_req, res) => res.json({ ok: true }));
+
+  // Overall picture for the UI: this service, RabbitMQ, and every storage node.
+  app.get("/system", async (_req, res) => {
+    const [rabbit, coordinator] = await Promise.all([
+      checkRabbit ? checkRabbit().catch(() => false) : Promise.resolve(undefined),
+      coordinatorHealth
+        ? coordinatorHealth().then(
+            (h) => ({ reachable: true, ...(h as object) }),
+            (e) => ({ reachable: false, error: String(e) }),
+          )
+        : Promise.resolve(undefined),
+    ]);
+    res.json({
+      requestService: "up",
+      rabbitmq: rabbit === undefined ? "unknown" : rabbit ? "up" : "down",
+      coordinator: coordinator ?? { reachable: null },
+    });
+  });
 
   app.use((err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
     if (err instanceof StoreUnavailableError) {
+      console.error(String(err));
       return res.status(503).json({ error: "storage unavailable" });
+    }
+    if (err instanceof UpdateConflictError) {
+      return res.status(409).json({ error: "too many concurrent changes, try again" });
     }
     const status = typeof (err as { status?: unknown }).status === "number" ? (err as { status: number }).status : 500;
     if (status === 500) console.error(err);
