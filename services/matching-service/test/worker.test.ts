@@ -127,22 +127,73 @@ describe("processMatch", () => {
 });
 
 describe("sweepPending", () => {
-  it("re-queues only pending requests older than the minimum age", async () => {
-    const store = new MemoryStore();
-    const old = await addRequest(store, "water", "A", new Date(Date.now() - 60_000).toISOString());
-    await addRequest(store, "water", "B", new Date().toISOString()); // too new
-    const done = await addRequest(store, "water", "C", new Date(Date.now() - 60_000).toISOString());
-    await store.put(requestKey(done.id), { ...done, status: "ASSIGNED" });
+  const old = () => new Date(Date.now() - 60_000).toISOString();
 
+  it("re-queues pending requests that a free resource could serve", async () => {
+    const store = new MemoryStore();
+    await addResource(store, "water", "Zone A");
+    const waiting = await addRequest(store, "water", "Zone A", old());
     const queued: string[] = [];
-    const count = await sweepPending(store, async (id) => void queued.push(id), 10_000);
-    expect(count).toBe(1);
-    expect(queued).toEqual([old.id]);
+    expect(await sweepPending(store, async (id) => void queued.push(id), 10_000)).toBe(1);
+    expect(queued).toEqual([waiting.id]);
+  });
+
+  it("skips requests that are too new, already handled, or that no resource could serve", async () => {
+    const store = new MemoryStore();
+    await addResource(store, "water", "Zone A");
+    await addRequest(store, "water", "Zone A", new Date().toISOString()); // too new
+    const done = await addRequest(store, "water", "Zone A", old());
+    await store.put(requestKey(done.id), { ...done, status: "ASSIGNED" }); // already handled
+    await addRequest(store, "shelter", "Zone A", old()); // wrong type
+    await addRequest(store, "water", "Zone Z", old()); // nobody there
+    await addRequest(store, "water", "12.97, 77.59", old()); // zone resource never serves coordinates
+    const queued: string[] = [];
+    expect(await sweepPending(store, async (id) => void queued.push(id), 10_000)).toBe(0);
+    expect(queued).toEqual([]);
+  });
+
+  it("does not keep re-queuing unmatchable requests on every sweep", async () => {
+    const store = new MemoryStore();
+    for (let i = 0; i < 30; i++) await addRequest(store, "medicine", `Nowhere ${i}`, old());
+    let published = 0;
+    for (let sweep = 0; sweep < 5; sweep++) await sweepPending(store, async () => void published++, 0);
+    expect(published).toBe(0);
+  });
+
+  it("queues a waiting request as soon as a matching resource appears", async () => {
+    const store = new MemoryStore();
+    const req = await addRequest(store, "food", "12.97, 77.59", old());
+    const queued: string[] = [];
+    expect(await sweepPending(store, async (id) => void queued.push(id), 0)).toBe(0);
+    await addResource(store, "food", "12.975, 77.595"); // ~0.7 km away
+    expect(await sweepPending(store, async (id) => void queued.push(id), 0)).toBe(1);
+    expect(queued).toEqual([req.id]);
+  });
+
+  it("respects the matching radius", async () => {
+    const store = new MemoryStore();
+    await addRequest(store, "food", "12.97, 77.59", old());
+    await addResource(store, "food", "12.99, 77.59"); // ~2.2 km away
+    expect(await sweepPending(store, async () => {}, 0, { radiusKm: 1 })).toBe(0);
+    expect(await sweepPending(store, async () => {}, 0, { radiusKm: 5 })).toBe(1);
+  });
+
+  it("re-queues a request whose resource claim was left half-finished by a crashed matcher", async () => {
+    const store = new MemoryStore();
+    const res = await addResource(store, "shelter", "Zone C");
+    const req = await addRequest(store, "shelter", "Zone C", old());
+    // The matcher claimed the resource but died before marking the request ASSIGNED.
+    await store.put(resourceKey(res.id), { ...res, status: "ASSIGNED", availability: false, assignedRequestId: req.id });
+    const queued: string[] = [];
+    expect(await sweepPending(store, async (id) => void queued.push(id), 0)).toBe(1);
+    expect(queued).toEqual([req.id]);
+    expect(await processMatch(req.id, store)).toBe("assigned"); // and the next attempt completes it
   });
 
   it("propagates publish failures so the caller can log and retry on the next sweep", async () => {
     const store = new MemoryStore();
-    await addRequest(store, "water", "A", new Date(Date.now() - 60_000).toISOString());
+    await addResource(store, "water", "A");
+    await addRequest(store, "water", "A", old());
     await expect(
       sweepPending(store, async () => {
         throw new Error("rabbit down");

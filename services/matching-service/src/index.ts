@@ -25,7 +25,7 @@ const sweepTimer = setInterval(async () => {
   if (sweeping) return;
   sweeping = true;
   try {
-    const queued = await sweepPending(store, (requestId) => publisher.publish({ requestId }), sweepMinAgeMs);
+    const queued = await sweepPending(store, (requestId) => publisher.publish({ requestId }), sweepMinAgeMs, { radiusKm });
     if (queued > 0) console.log(`sweeper re-queued ${queued} pending request(s)`);
   } catch (err) {
     console.error(`sweeper failed: ${String(err)}`);
