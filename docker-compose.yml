@@ -172,6 +172,13 @@ services:
     depends_on:
       request-service:
         condition: service_healthy
+    healthcheck:
+      # The page is server-rendered, so a 200 means the Start server is really up.
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
 
 volumes:
   rabbitmq-data:

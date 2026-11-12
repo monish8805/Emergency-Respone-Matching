@@ -1,2 +1,13 @@
-node_modules
+# The backend images only need the workspace manifests, shared/ and services/.
+# Patterns need ** to match nested folders: a bare "node_modules" only matches the top level.
+**/node_modules
+**/.output
+**/dist
+**/test
 .git
+web
+k8s
+docs
+scripts
+*.md
+docker-compose.yml
