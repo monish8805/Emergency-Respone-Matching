@@ -1,0 +1,42 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: storage-s0
+  namespace: emergency
+spec:
+  # During a node drain or upgrade, never take both nodes of a shard down at once.
+  maxUnavailable: 1
+  selector:
+    matchLabels: {app: storage, shard: "0"}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: storage-s1
+  namespace: emergency
+spec:
+  # During a node drain or upgrade, never take both nodes of a shard down at once.
+  maxUnavailable: 1
+  selector:
+    matchLabels: {app: storage, shard: "1"}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: storage-s2
+  namespace: emergency
+spec:
+  # During a node drain or upgrade, never take both nodes of a shard down at once.
+  maxUnavailable: 1
+  selector:
+    matchLabels: {app: storage, shard: "2"}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: request-service
+  namespace: emergency
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels: {app: request-service}

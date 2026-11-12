@@ -26,6 +26,16 @@ spec:
     metadata:
       labels: {app: storage, shard: "0"}
     spec:
+      # Prefer putting the two nodes of a shard on different machines, so one machine failing
+      # cannot take out both copies. "Preferred" so a single-node cluster (minikube) still schedules.
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels: {app: storage, shard: "0"}
       containers:
         - name: storage
           image: emergency/storage-node:latest
@@ -90,6 +100,16 @@ spec:
     metadata:
       labels: {app: storage, shard: "1"}
     spec:
+      # Prefer putting the two nodes of a shard on different machines, so one machine failing
+      # cannot take out both copies. "Preferred" so a single-node cluster (minikube) still schedules.
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels: {app: storage, shard: "1"}
       containers:
         - name: storage
           image: emergency/storage-node:latest
@@ -154,6 +174,16 @@ spec:
     metadata:
       labels: {app: storage, shard: "2"}
     spec:
+      # Prefer putting the two nodes of a shard on different machines, so one machine failing
+      # cannot take out both copies. "Preferred" so a single-node cluster (minikube) still schedules.
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels: {app: storage, shard: "2"}
       containers:
         - name: storage
           image: emergency/storage-node:latest

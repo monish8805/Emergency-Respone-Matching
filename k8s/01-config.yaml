@@ -1,4 +1,6 @@
 # Non-secret settings shared by the services.
+# The RabbitMQ credentials are not stored here: scripts/deploy-k8s.sh creates the
+# 'rabbitmq-credentials' Secret with a random password the first time it runs.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -13,15 +15,3 @@ data:
   SWEEP_MIN_AGE_MS: "10000"
   # The shard layout: 3 shards, each with two pods (the first is the primary).
   STORAGE_NODES: '[{"id":"storage-s0-0","shard":0,"url":"http://storage-s0-0.storage-s0:4000"},{"id":"storage-s0-1","shard":0,"url":"http://storage-s0-1.storage-s0:4000"},{"id":"storage-s1-0","shard":1,"url":"http://storage-s1-0.storage-s1:4000"},{"id":"storage-s1-1","shard":1,"url":"http://storage-s1-1.storage-s1:4000"},{"id":"storage-s2-0","shard":2,"url":"http://storage-s2-0.storage-s2:4000"},{"id":"storage-s2-1","shard":2,"url":"http://storage-s2-1.storage-s2:4000"}]'
----
-# Development credentials. For anything real, create this Secret out of band instead of committing it.
-apiVersion: v1
-kind: Secret
-metadata:
-  name: rabbitmq-credentials
-  namespace: emergency
-type: Opaque
-stringData:
-  RABBITMQ_DEFAULT_USER: emergency
-  RABBITMQ_DEFAULT_PASS: change-me-in-real-deployments
-  RABBITMQ_URL: amqp://emergency:change-me-in-real-deployments@rabbitmq:5672
