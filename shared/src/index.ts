@@ -5,4 +5,5 @@ export * from "./hash";
 export * from "./store";
 export * from "./geo";
 export * from "./match";
+export * from "./transitions";
 export * from "./rabbit";
