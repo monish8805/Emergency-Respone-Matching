@@ -11,7 +11,8 @@ minikube service web -n emergency
 # T2: watch pods live
 kubectl -n emergency get pods -w
 
-# T3: RabbitMQ management UI, http://localhost:15672 (login emergency / change-me-in-real-deployments)
+# T3: RabbitMQ management UI, http://localhost:15672
+#     login: emergency / the password from:  kubectl -n emergency get secret rabbitmq-credentials -o jsonpath='{.data.RABBITMQ_DEFAULT_PASS}' | base64 -d
 kubectl -n emergency port-forward svc/rabbitmq 15672:15672
 
 # T4: matching service log, shows each match as it happens

@@ -40,7 +40,7 @@ A location is either a **zone name** (`Zone A`) or **coordinates** (`12.97, 77.5
 - **Replication and failover.** Writes go to every live node in the shard. Reads use the first live node (the primary), falling back to the replica. A failed call or missing heartbeat marks the node `down`.
 - **Recovery without stale reads.** A node that comes back is `syncing`: it receives new writes but serves no reads until it has been reconciled with its peer. Reconciliation runs per key under that key's lock and the higher version wins in both directions, so an old copy can never overwrite a newer write.
 - **Durability.** With `DATA_DIR` set (Compose volumes / Kubernetes PVCs) each node persists its data, so even losing both nodes of a shard at once loses nothing.
-- **Reliable messaging.** Publishes wait for broker confirms and reconnect after broker restarts. Failed jobs go to a delayed retry queue (5 attempts) then the dead-letter queue. If a publish fails, the request stays `PENDING` and the matcher's sweeper re-queues it, so nothing is stuck.
+- **Reliable messaging.** Publishes wait for broker confirms and reconnect after broker restarts. Failed jobs go to a delayed retry queue (5 attempts) then the dead-letter queue. If a publish fails, the request stays `PENDING` and the matcher's sweeper re-queues it, so nothing is stuck. Connecting and confirming are time-limited and heartbeats are on, so a broker outage never makes the API hang: it answers at once with `x-match-queued: false`. The sweeper only re-queues requests a free resource could actually serve, so unmatchable requests cost nothing.
 
 ## Run with Docker Compose
 
@@ -63,9 +63,10 @@ API: `POST/GET /requests`, `GET /requests/:id`, `PUT /requests/:id/status`, `POS
 ### Simulate shard failure and recovery
 
 ```bash
-docker compose kill storage-s0-primary          # the replica keeps serving reads and writes
+docker kill $(docker compose ps -q storage-s0-primary)   # the replica keeps serving reads and writes
 curl localhost:3005/system | jq '.coordinator.shards'
 docker compose start storage-s0-primary         # it reconciles with its replica, then rejoins
+# Note: `docker kill` counts as a manual stop, so Docker will NOT restart it for you. A real crash is restarted automatically.
 docker compose logs coordinator | tail          # "reconciled ... node ... is up"
 ```
 
@@ -76,7 +77,7 @@ docker compose logs coordinator | tail          # "reconciled ... node ... is up
 minikube service web -n emergency    # open the UI
 ```
 
-Storage is three StatefulSets (one per shard, two pods each, each with a volume). RabbitMQ is a StatefulSet with a volume. The Request Service, Matching Service and Web are Deployments and scale with `kubectl scale`. The coordinator is a single replica by design. Non-secret settings live in a ConfigMap and the RabbitMQ credentials in a Secret (development values, replace them for real use).
+Storage is three StatefulSets (one per shard, two pods each, each with a volume). RabbitMQ is a StatefulSet with a volume. The Request Service, Matching Service and Web are Deployments and scale with `kubectl scale`. The coordinator is a single replica by design. Non-secret settings live in a ConfigMap. The RabbitMQ credentials are a Secret that `scripts/deploy-k8s.sh` creates with a random password the first time it runs (and keeps afterwards), so no password is stored in git. Storage nodes prefer different machines (soft anti-affinity) and PodDisruptionBudgets stop a node drain from taking both nodes of a shard down.
 
 Simulate failures:
 

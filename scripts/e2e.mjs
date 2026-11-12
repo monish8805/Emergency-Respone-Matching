@@ -28,7 +28,8 @@ const platform =
         storage: (shard, role) => `storage-s${shard}-${role}`,
         exec: (svc, cmd) => c(`exec -T ${svc} ${cmd}`),
         kill: (svc) => c(`kill ${svc}`),
-        // compose restarts killed containers by policy; start is a no-op if it already did
+        // `docker kill` counts as a manual stop, so the restart policy does NOT bring the container
+        // back (a crash does). Start it explicitly.
         recover: (svc) => c(`start ${svc}`),
         waitReady: (svc) => waitHealthyCompose(svc),
         stop: (svc) => c(`stop ${svc}`),
@@ -96,14 +97,18 @@ function tunnel(service) {
 let API;
 
 async function http(path, { method = "GET", body } = {}) {
+  // Only reads are retried. Replaying a write after a timeout can create it twice (the server may
+  // have stored it before the client gave up), which silently corrupts what a test is checking.
+  const attempts = method === "GET" ? 4 : 1;
+  const timeoutMs = method === "GET" ? 8000 : 30000;
   let lastErr;
-  for (let i = 0; i < 4; i++) {
+  for (let i = 0; i < attempts; i++) {
     try {
       const res = await fetch(API + path, {
         method,
         headers: body ? { "content-type": "application/json" } : undefined,
         body: body ? JSON.stringify(body) : undefined,
-        signal: AbortSignal.timeout(8000),
+        signal: AbortSignal.timeout(timeoutMs),
       });
       const text = await res.text();
       let json;
@@ -312,6 +317,34 @@ test("6. rabbitmq outage: requests are still accepted and get matched after the 
   assert(done.status === "ASSIGNED", "request matched after the broker came back");
   const after = await newRequest("water", `after-${run}`);
   assert(after.status === 201 && after.headers.get("x-match-queued") !== "false", "new requests are queued normally again");
+});
+
+test("6b. rabbitmq restart: jobs already queued survive a restart of the broker itself", async () => {
+  // Stop the matcher (and its sweeper) so nothing can re-create the jobs: only the broker's
+  // own storage can keep them.
+  platform.stopMatching();
+  await sleep(2000);
+  const loc = `broker-restart-${run}`;
+  const n = 3;
+  const resources = [];
+  for (let i = 0; i < n; i++) resources.push(await newResource("shelter", `${loc}-${i}`));
+  const reqs = [];
+  for (let i = 0; i < n; i++) reqs.push(await newRequest("shelter", `${loc}-${i}`));
+  assert(reqs.every((r) => r.status === 201 && r.headers.get("x-match-queued") !== "false"), "all jobs queued");
+  await sleep(1500);
+  assert(rabbitQueues()["match.requests"].messages >= n, "jobs are waiting in the queue");
+
+  platform.stop(platform.rabbit);
+  await sleep(2000);
+  platform.start(platform.rabbit);
+  await waitFor("broker back", async () => (await system()).rabbitmq === "up", 120000, 2000);
+  await waitFor("queue readable", () => rabbitQueues()["match.requests"] !== undefined, 60000, 2000);
+  const held = rabbitQueues()["match.requests"].messages;
+  assert(held >= n, `the ${n} queued jobs survived the broker restart (${held} in the queue)`);
+
+  platform.startMatching();
+  const done = await Promise.all(reqs.map((r) => waitAssigned(r.body.id, 90000)));
+  assert(new Set(done.map((d) => d.resourceId)).size === n, "every queued job was matched after the restart");
 });
 
 test("7. sharding: data spread across all 3 shards, replicas identical", async () => {
