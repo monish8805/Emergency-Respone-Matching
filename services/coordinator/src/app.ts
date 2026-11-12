@@ -46,9 +46,11 @@ export function createCoordinatorApp(registry: NodeRegistry) {
     }
   }
 
-  // Versions only go up, even across coordinator restarts (they follow the clock).
+  // Versions follow the clock and only ever go up while this process runs. After a restart
+  // the clock may be behind versions already stored: writeEntry notices when a node refuses a
+  // write as stale and jumps past the newer version, so a write is never silently lost.
   let lastVersion = 0;
-  const nextVersion = () => (lastVersion = Math.max(lastVersion + 1, Date.now()));
+  const nextVersion = (atLeast = 0) => (lastVersion = Math.max(lastVersion + 1, Date.now(), atLeast));
 
   // ---- single-key operations ----
 
@@ -70,20 +72,40 @@ export function createCoordinatorApp(registry: NodeRegistry) {
   }
 
   // Writes to every node of the shard that is alive (primary, replica, and nodes catching up).
-  async function writeEntry(shard: number, key: string, value: unknown): Promise<{ ok: boolean; replicas: number; version: number }> {
+  // A node answers { applied: false, version } when it already holds a NEWER version, which means
+  // our version is too low (clock behind after a restart). Then we move past it and write again,
+  // instead of reporting success for a write that was thrown away.
+  async function writeEntry(
+    shard: number,
+    key: string,
+    value: unknown,
+    atLeast = 0,
+  ): Promise<{ ok: boolean; replicas: number; version: number }> {
     const targets = registry.writeNodes(shard);
-    const version = nextVersion();
-    const results = await Promise.all(
-      targets.map((n) =>
-        call(n, "PUT", `/internal/data/${encodeURIComponent(key)}`, value, { "x-version": String(version) }),
-      ),
-    );
-    let accepted = 0;
-    results.forEach((r, i) => {
-      if (r?.ok) accepted++;
-      else registry.markDown(targets[i].id);
-    });
-    return { ok: accepted > 0, replicas: accepted, version };
+    let minimum = atLeast;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const version = nextVersion(minimum);
+      const results = await Promise.all(
+        targets.map((n) =>
+          call(n, "PUT", `/internal/data/${encodeURIComponent(key)}`, value, { "x-version": String(version) }),
+        ),
+      );
+      let accepted = 0;
+      let newest = 0;
+      for (const [i, r] of results.entries()) {
+        if (!r?.ok) {
+          registry.markDown(targets[i].id);
+          continue;
+        }
+        const reply = (await r.json().catch(() => ({}))) as { applied?: boolean; version?: number };
+        if (reply.applied === false) newest = Math.max(newest, Number(reply.version) || 0);
+        else accepted++;
+      }
+      if (newest === 0) return { ok: accepted > 0, replicas: accepted, version };
+      console.warn(`write to ${key} was older than stored version ${newest}, retrying above it`);
+      minimum = newest + 1;
+    }
+    return { ok: false, replicas: 0, version: lastVersion };
   }
 
   // ---- resync ----
@@ -222,7 +244,7 @@ export function createCoordinatorApp(registry: NodeRegistry) {
       if (current === "unavailable") return { code: 503 as const };
       const currentVersion = current === "missing" ? null : current.version;
       if (currentVersion !== expectedVersion) return { code: 409 as const, currentVersion };
-      const written = await writeEntry(shard, key, value);
+      const written = await writeEntry(shard, key, value, (currentVersion ?? 0) + 1);
       return written.ok ? { code: 200 as const, version: written.version } : { code: 503 as const };
     });
     if (outcome.code === 200) res.json({ ok: true, version: outcome.version });

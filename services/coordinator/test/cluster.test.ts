@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import request from "supertest";
 import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -296,5 +296,74 @@ describe("recovery and synchronization", () => {
     await heartbeat(p);
     await waitUntil("primary up", () => statusOf(p.config.id) === "up");
     expect(p.data.get(key)!.value).toEqual({ v: 2 });
+  });
+});
+
+describe("version ordering when the clock is behind", () => {
+  // A coordinator that restarts with its clock behind the versions already stored (clock step,
+  // VM drift) must not have its writes ignored while still answering "ok".
+  async function restartedCoordinatorWithSlowClock() {
+    const reg = new NodeRegistry(
+      storages.map((s) => s.config),
+      60_000,
+    );
+    const app = createCoordinatorApp(reg);
+    for (const s of storages) await request(app).post("/internal/nodes/heartbeat").send({ id: s.config.id, bootId: s.bootId });
+    await waitUntil("restarted coordinator sees all nodes up", () => storages.every((s) => reg.statusOf(s.config.id) === "up"));
+    return app;
+  }
+
+  it("applies a plain write that a lagging coordinator makes", async () => {
+    const key = "request:clock-put";
+    const shard = shardFor(key, 3);
+    await putKey(key, { v: "first" }).expect(200);
+    const firstVersion = primaryOf(shard).data.get(key)!.version;
+
+    const real = Date.now;
+    const clock = vi.spyOn(Date, "now").mockImplementation(() => real() - 10 * 60 * 1000);
+    try {
+      const lagging = await restartedCoordinatorWithSlowClock();
+      await request(lagging).put(`/internal/data/${encodeURIComponent(key)}`).send({ v: "second" }).expect(200);
+      expect((await request(lagging).get(`/internal/data/${encodeURIComponent(key)}`)).body).toEqual({ v: "second" });
+    } finally {
+      clock.mockRestore();
+    }
+    expect(primaryOf(shard).data.get(key)!.value).toEqual({ v: "second" });
+    expect(replicaOf(shard).data.get(key)).toEqual(primaryOf(shard).data.get(key));
+    expect(primaryOf(shard).data.get(key)!.version).toBeGreaterThan(firstVersion);
+  });
+
+  it("applies a compare-and-set that a lagging coordinator makes", async () => {
+    const key = "resource:clock-cas";
+    await putKey(key, { status: "AVAILABLE" }).expect(200);
+    const version = Number((await getKey(key)).headers["x-version"]);
+
+    const real = Date.now;
+    const clock = vi.spyOn(Date, "now").mockImplementation(() => real() - 10 * 60 * 1000);
+    try {
+      const lagging = await restartedCoordinatorWithSlowClock();
+      const url = `/internal/cas/${encodeURIComponent(key)}`;
+      await request(lagging).post(url).send({ expectedVersion: version, value: { status: "ASSIGNED" } }).expect(200);
+      expect((await request(lagging).get(`/internal/data/${encodeURIComponent(key)}`)).body).toEqual({ status: "ASSIGNED" });
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
+  it("keeps versions increasing for later writes from the same coordinator", async () => {
+    const key = "request:clock-many";
+    const shard = shardFor(key, 3);
+    await putKey(key, { n: 0 }).expect(200);
+    const real = Date.now;
+    const clock = vi.spyOn(Date, "now").mockImplementation(() => real() - 10 * 60 * 1000);
+    try {
+      const lagging = await restartedCoordinatorWithSlowClock();
+      for (let n = 1; n <= 5; n++) {
+        await request(lagging).put(`/internal/data/${encodeURIComponent(key)}`).send({ n }).expect(200);
+      }
+    } finally {
+      clock.mockRestore();
+    }
+    expect(primaryOf(shard).data.get(key)!.value).toEqual({ n: 5 });
   });
 });
