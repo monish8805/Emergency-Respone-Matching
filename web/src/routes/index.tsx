@@ -1,8 +1,8 @@
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import { createFileRoute } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  REQUEST_STATUSES,
+  REQUEST_NEXT,
   RESOURCE_STATUSES,
   RESOURCE_TYPES,
   createRequest,
@@ -14,6 +14,7 @@ import {
   setResourceStatus,
   triggerMatch,
   type RequestStatus,
+  type Resource,
   type ResourceStatus,
   type ResourceType,
   type SystemStatus,
@@ -23,18 +24,34 @@ export const Route = createFileRoute("/")({ component: Home });
 
 const POLL_MS = 3000;
 
+// While nothing has loaded yet, TanStack Query clears a query's error every time it starts the next
+// poll, so a plain `query.error` flashes on for a moment and off again. This keeps the last error
+// on screen until a load actually succeeds.
+function useStickyError(query: { error: Error | null; isSuccess: boolean; dataUpdatedAt: number }) {
+  const [sticky, setSticky] = useState<Error | null>(null);
+  useEffect(() => {
+    if (query.error) setSticky(query.error);
+    else if (query.isSuccess) setSticky(null);
+  }, [query.error, query.isSuccess, query.dataUpdatedAt]);
+  return sticky;
+}
+
 function Home() {
   const queryClient = useQueryClient();
   const [notice, setNotice] = useState<string | null>(null);
 
-  const requests = useQuery({ queryKey: ["requests"], queryFn: () => listRequests(), refetchInterval: POLL_MS });
-  const resources = useQuery({ queryKey: ["resources"], queryFn: () => listResources(), refetchInterval: POLL_MS });
+  // No automatic retries: the poll already retries every few seconds, and retries would only keep
+  // the page on "Loading…" for longer when the backend is down.
+  const requests = useQuery({ queryKey: ["requests"], queryFn: () => listRequests(), refetchInterval: POLL_MS, retry: false });
+  const resources = useQuery({ queryKey: ["resources"], queryFn: () => listResources(), refetchInterval: POLL_MS, retry: false });
+  const requestsError = useStickyError(requests);
+  const resourcesError = useStickyError(resources);
   const system = useQuery({ queryKey: ["system"], queryFn: () => getSystem(), refetchInterval: POLL_MS, retry: false });
 
   // Every mutation refreshes both lists, since matching changes both.
-  const options = (message?: string) => ({
-    onSuccess: () => {
-      setNotice(message ?? null);
+  const options = <T,>(message?: string | ((result: T) => string | null)) => ({
+    onSuccess: (result: T) => {
+      setNotice(typeof message === "function" ? message(result) : (message ?? null));
       return queryClient.invalidateQueries();
     },
     onError: () => setNotice(null),
@@ -43,16 +60,27 @@ function Home() {
   const submitRequest = useMutation({ mutationFn: createRequest, ...options("Request submitted") });
   const submitResource = useMutation({ mutationFn: registerResource, ...options("Resource registered") });
   const updateRequest = useMutation({ mutationFn: setRequestStatus, ...options() });
-  const updateResource = useMutation({ mutationFn: setResourceStatus, ...options() });
+  const updateResource = useMutation({
+    mutationFn: setResourceStatus,
+    ...options<Resource>((r) =>
+      r.releasedRequestId ? "That resource was serving a request, which went back to PENDING to be matched again." : null,
+    ),
+  });
   const match = useMutation({ mutationFn: triggerMatch, ...options("Match queued") });
 
   // The health panel reports its own failures, so they do not also show up as a banner.
-  const error = [requests, resources, submitRequest, submitResource, updateRequest, updateResource, match]
-    .map((q) => q.error)
-    .find(Boolean);
+  const actionError = [submitRequest, submitResource, updateRequest, updateResource, match].map((q) => q.error).find(Boolean);
+  const loadError = requestsError ?? resourcesError;
+  const error = actionError ?? (loadError ? new Error(`Cannot load data: ${loadError.message}`) : null);
 
   const requestList = requests.data ?? [];
   const resourceList = resources.data ?? [];
+
+  const requestLabel = (id: string | null | undefined) => {
+    if (!id) return "—";
+    const r = requestList.find((x) => x.id === id);
+    return r ? `${r.type} @ ${r.location}` : id.slice(0, 8);
+  };
 
   const resourceLabel = (id: string | null) => {
     if (!id) return "—";
@@ -73,7 +101,7 @@ function Home() {
       </div>
 
       <section>
-        <h2>Requests ({requestList.length})</h2>
+        <h2>Requests{requests.data ? ` (${requestList.length})` : ""}</h2>
         <table>
           <thead>
             <tr>
@@ -90,7 +118,11 @@ function Home() {
             {requestList.length === 0 && (
               <tr>
                 <td colSpan={7} className="empty">
-                  {requests.isPending ? "Loading…" : "No requests yet."}
+                  {requestsError
+                    ? `Could not load requests: ${requestsError.message}. Retrying every ${POLL_MS / 1000} seconds…`
+                    : requests.isPending
+                      ? "Loading…"
+                      : "No requests yet."}
                 </td>
               </tr>
             )}
@@ -102,7 +134,8 @@ function Home() {
                 <td>
                   <StatusSelect
                     value={r.status}
-                    options={REQUEST_STATUSES}
+                    options={[r.status, ...REQUEST_NEXT[r.status]]}
+                    disabled={REQUEST_NEXT[r.status].length === 0}
                     onChange={(s) => updateRequest.mutate({ data: { id: r.id, status: s as RequestStatus } })}
                   />
                 </td>
@@ -123,21 +156,26 @@ function Home() {
       </section>
 
       <section>
-        <h2>Resources ({resourceList.length})</h2>
+        <h2>Resources{resources.data ? ` (${resourceList.length})` : ""}</h2>
         <table>
           <thead>
             <tr>
               <th>Type</th>
               <th>Location</th>
               <th>Status</th>
+              <th>Serving request</th>
               <th>ID</th>
             </tr>
           </thead>
           <tbody>
             {resourceList.length === 0 && (
               <tr>
-                <td colSpan={4} className="empty">
-                  {resources.isPending ? "Loading…" : "No resources registered."}
+                <td colSpan={5} className="empty">
+                  {resourcesError
+                    ? `Could not load resources: ${resourcesError.message}. Retrying every ${POLL_MS / 1000} seconds…`
+                    : resources.isPending
+                      ? "Loading…"
+                      : "No resources registered."}
                 </td>
               </tr>
             )}
@@ -152,6 +190,7 @@ function Home() {
                     onChange={(s) => updateResource.mutate({ data: { id: r.id, status: s as ResourceStatus } })}
                   />
                 </td>
+                <td>{requestLabel(r.assignedRequestId)}</td>
                 <td className="mono">{r.id.slice(0, 8)}</td>
               </tr>
             ))}
@@ -218,13 +257,15 @@ function StatusSelect({
   value,
   options,
   onChange,
+  disabled = false,
 }: {
   value: string;
   options: readonly string[];
   onChange: (value: string) => void;
+  disabled?: boolean;
 }) {
   return (
-    <select className={`status ${value}`} value={value} onChange={(e) => onChange(e.target.value)}>
+    <select className={`status ${value}`} value={value} disabled={disabled} onChange={(e) => onChange(e.target.value)}>
       {options.map((o) => (
         <option key={o} value={o}>
           {o}

@@ -38,3 +38,4 @@ select.CANCELLED { background: #eee; }
 
 .hint { display: block; margin-top: 4px; font-weight: 400; font-size: .75rem; color: #65676b; }
 .muted { color: #65676b; }
+select:disabled { opacity: .75; cursor: not-allowed; }

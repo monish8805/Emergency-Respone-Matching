@@ -6,6 +6,16 @@ export type ResourceType = (typeof RESOURCE_TYPES)[number];
 export const REQUEST_STATUSES = ["PENDING", "ASSIGNED", "IN_PROGRESS", "COMPLETED", "CANCELLED"] as const;
 export type RequestStatus = (typeof REQUEST_STATUSES)[number];
 
+// What a request may be changed to by hand. Keep in sync with REQUEST_TRANSITIONS in
+// shared/src/transitions.ts (the API enforces it; this only decides what the dropdown offers).
+export const REQUEST_NEXT: Record<RequestStatus, readonly RequestStatus[]> = {
+  PENDING: ["CANCELLED"],
+  ASSIGNED: ["IN_PROGRESS", "COMPLETED", "CANCELLED"],
+  IN_PROGRESS: ["COMPLETED", "CANCELLED"],
+  COMPLETED: [],
+  CANCELLED: [],
+};
+
 export const RESOURCE_STATUSES = ["AVAILABLE", "ASSIGNED", "UNAVAILABLE"] as const;
 export type ResourceStatus = (typeof RESOURCE_STATUSES)[number];
 
@@ -26,6 +36,9 @@ export interface Resource {
   location: string;
   availability: boolean;
   status: ResourceStatus;
+  assignedRequestId?: string | null;
+  // Set when this change sent the request that was using the resource back to PENDING.
+  releasedRequestId?: string;
 }
 
 // Turns the API's error body into a readable message, including which fields were invalid.
