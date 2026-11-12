@@ -261,6 +261,43 @@ test("3b. distance matching: nearest resource within the radius wins, zone names
   assert((await getRequest(mixed.body.id)).status === "PENDING", "a coordinate request never matches a zone-name resource");
 });
 
+test("3c. status rules: no manual assigning, finished stays finished, a lost resource returns the request", async () => {
+  const loc = `rules-${run}`;
+  const put = (path, status) => api(path, { method: "PUT", body: { status } });
+
+  // A pending request cannot be assigned or completed by hand (only the matcher assigns).
+  const lone = await newRequest("food", `${loc}-nobody`);
+  assert((await put(`/requests/${lone.body.id}/status`, "ASSIGNED")).status === 409, "PENDING -> ASSIGNED by hand is refused");
+  assert((await put(`/requests/${lone.body.id}/status`, "COMPLETED")).status === 409, "PENDING -> COMPLETED is refused");
+  assert((await getRequest(lone.body.id)).resourceId === null, "no request is ever ASSIGNED without a resource");
+
+  // Taking a resource away sends its request back to be matched again, never leaving two on one resource.
+  const res = await newResource("water", `${loc}-w`);
+  const first = await newRequest("water", `${loc}-w`);
+  await waitAssigned(first.body.id);
+  const off = await put(`/resources/${res.body.id}/status`, "UNAVAILABLE");
+  assert(off.status === 200 && off.body.releasedRequestId === first.body.id, "response says which request was released");
+  assert((await getRequest(first.body.id)).status === "PENDING", "its request went back to PENDING");
+  const second = await newRequest("water", `${loc}-w`);
+  await sleep(4000);
+  assert((await getRequest(second.body.id)).status === "PENDING", "an unavailable resource cannot be taken by another request");
+
+  // Both now compete for the one resource: exactly one wins.
+  await put(`/resources/${res.body.id}/status`, "AVAILABLE");
+  await waitFor("one winner", async () => {
+    const both = await Promise.all([first, second].map((r) => getRequest(r.body.id)));
+    return both.some((r) => r.status === "ASSIGNED");
+  }, 60000);
+  await sleep(3000);
+  const both = await Promise.all([first, second].map((r) => getRequest(r.body.id)));
+  assert(both.filter((r) => r.status === "ASSIGNED").length === 1, "exactly one request holds the resource");
+
+  // A finished request stays finished.
+  const winner = both.find((r) => r.status === "ASSIGNED");
+  assert((await put(`/requests/${winner.id}/status`, "COMPLETED")).status === 200, "ASSIGNED -> COMPLETED is allowed");
+  assert((await put(`/requests/${winner.id}/status`, "PENDING")).status === 409, "COMPLETED -> PENDING is refused");
+});
+
 test("4. matching: late resource is matched automatically, 409 on re-match, cancel frees the resource", async () => {
   const loc = `late-${run}`;
   const req = await newRequest("shelter", loc);

@@ -34,6 +34,12 @@ A location is either a **zone name** (`Zone A`) or **coordinates** (`12.97, 77.5
 - A zone name matches only the same zone name (case-insensitive).
 - A zone name never matches coordinates, and the other way round.
 
+### Status rules
+
+A request moves forward only: `PENDING → ASSIGNED` is done by the matcher (never by hand), then `IN_PROGRESS`, `COMPLETED`, and any non-finished request can be `CANCELLED`. `COMPLETED` and `CANCELLED` are final. The API answers `409` with the allowed next statuses for anything else, and the UI only offers valid choices.
+
+If a resource that is serving a request is set to `AVAILABLE` or `UNAVAILABLE`, that request goes back to `PENDING` and is queued to be matched again, so a resource can never be assigned to two requests at once.
+
 ### How the hard parts work
 
 - **No double assignment.** The coordinator versions every record. The matcher claims a resource with compare-and-set (`POST /internal/cas/:key`), so when requests race for one resource exactly one wins and the others move on. The claim stores the owning request id, so a matcher that crashes mid-assignment is completed (not leaked) by the next attempt.
@@ -103,7 +109,7 @@ See `docs/DEMO.md` for the demonstration script.
 
 - **Single coordinator.** It serializes writes per key and holds node health in memory. If it is down, the API returns 503 until it restarts (storage data is unaffected). Running several coordinators would need a consensus layer.
 - **No quorum.** With replication factor 2, if one node is down the other is the only copy and serves alone. Two simultaneous node losses in one shard make that shard unavailable (data is safe on disk and returns when the nodes do).
-- **Last-write-wins versions** follow the coordinator's clock, so a clock that jumps backwards across a coordinator restart could briefly confuse ordering.
+- Record versions follow the coordinator's clock. If a restarted coordinator's clock is behind the stored versions, it detects the refused write and moves past the newer version, so no write is lost (covered by tests). Ordering between *different* coordinators is not defined: run one.
 - Distance matching uses a straight-line (haversine) distance, not road distance, and one fixed radius for every request type.
 - Storage persistence rewrites the node's snapshot on each write: fine for a demo, not for large data sets.
 - Changing the RabbitMQ queue topology on an existing broker with old queues requires deleting those queues.
