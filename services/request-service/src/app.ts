@@ -9,8 +9,11 @@ import {
   resourceStatusSchema,
   REQUEST_PREFIX,
   RESOURCE_PREFIX,
+  InvalidTransitionError,
   StoreUnavailableError,
   UpdateConflictError,
+  canTransition,
+  REQUEST_TRANSITIONS,
   updateRecord,
   type EmergencyRequest,
   type KeyValueStore,
@@ -75,9 +78,12 @@ export function createRequestApp({ store, publishMatch, checkRabbit, coordinator
   app.put("/requests/:id/status", async (req, res) => {
     const parsed = requestStatusSchema.safeParse(req.body);
     if (!parsed.success) return invalid(res, parsed.error);
-    const updated = await updateRecord<EmergencyRequest>(store, requestKey(req.params.id), (r) =>
-      r.status === parsed.data.status ? r : { ...r, status: parsed.data.status },
-    );
+    const updated = await updateRecord<EmergencyRequest>(store, requestKey(req.params.id), (r) => {
+      if (r.status === parsed.data.status) return r;
+      // Checked against the exact record that is being replaced, so it cannot race with the matcher.
+      if (!canTransition(r.status, parsed.data.status)) throw new InvalidTransitionError(r.status, parsed.data.status);
+      return { ...r, status: parsed.data.status };
+    });
     if (!updated) return res.status(404).json({ error: "request not found" });
 
     // A finished or cancelled request gives its resource back.
@@ -114,14 +120,40 @@ export function createRequestApp({ store, publishMatch, checkRabbit, coordinator
   app.put("/resources/:id/status", async (req, res) => {
     const parsed = resourceStatusSchema.safeParse(req.body);
     if (!parsed.success) return invalid(res, parsed.error);
-    const updated = await updateRecord<Resource>(store, resourceKey(req.params.id), (r) => ({
+    const current = await store.get<Resource>(resourceKey(req.params.id));
+    if (!current) return res.status(404).json({ error: "resource not found" });
+
+    // If this resource is serving a request and is now being made available again or taken out,
+    // that request goes back to PENDING first. Otherwise the resource could be matched to someone
+    // else while the original request still believes it has it (two requests, one resource).
+    // Order matters: if we crash between the two steps the request is PENDING and the resource is
+    // still claimed for it, which the matcher completes safely instead of double-assigning.
+    let releasedRequestId: string | undefined;
+    if (current.assignedRequestId && parsed.data.status !== "ASSIGNED") {
+      const owner = current.assignedRequestId;
+      const released = await updateRecord<EmergencyRequest>(store, requestKey(owner), (r) =>
+        r.resourceId === current.id && (r.status === "ASSIGNED" || r.status === "IN_PROGRESS")
+          ? { ...r, status: "PENDING", resourceId: null, distanceKm: null }
+          : r,
+      );
+      if (released?.status === "PENDING" && released.resourceId === null) releasedRequestId = owner;
+    }
+
+    const updated = await updateRecord<Resource>(store, resourceKey(current.id), (r) => ({
       ...r,
       status: parsed.data.status,
       availability: parsed.data.status === "AVAILABLE",
-      assignedRequestId: parsed.data.status === "ASSIGNED" ? r.assignedRequestId ?? null : null,
+      assignedRequestId: parsed.data.status === "ASSIGNED" ? (r.assignedRequestId ?? null) : null,
     }));
     if (!updated) return res.status(404).json({ error: "resource not found" });
-    res.json(updated);
+
+    if (releasedRequestId) {
+      // Look for another resource right away. If queueing fails, the matcher's sweeper picks it up.
+      await publishMatch(releasedRequestId).catch((err) =>
+        console.error(`could not re-queue request ${releasedRequestId}, the sweeper will retry: ${String(err)}`),
+      );
+    }
+    res.json(releasedRequestId ? { ...updated, releasedRequestId } : updated);
   });
 
   app.post("/match/:requestId", async (req, res) => {
@@ -164,6 +196,14 @@ export function createRequestApp({ store, publishMatch, checkRabbit, coordinator
     if (err instanceof StoreUnavailableError) {
       console.error(String(err));
       return res.status(503).json({ error: "storage unavailable" });
+    }
+    if (err instanceof InvalidTransitionError) {
+      return res.status(409).json({
+        error: err.message,
+        from: err.from,
+        to: err.to,
+        allowed: REQUEST_TRANSITIONS[err.from],
+      });
     }
     if (err instanceof UpdateConflictError) {
       return res.status(409).json({ error: "too many concurrent changes, try again" });

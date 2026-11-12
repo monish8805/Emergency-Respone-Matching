@@ -65,7 +65,7 @@ describe("request service", () => {
       .post("/requests")
       .send({ type: "food", location: "Zone A" })
       .expect(201);
-    await request(app).put(`/requests/${created.body.id}/status`).send({ status: "ASSIGNED" }).expect(200);
+    await request(app).put(`/requests/${created.body.id}/status`).send({ status: "CANCELLED" }).expect(200);
     await request(app).post(`/match/${created.body.id}`).expect(409);
   });
 
@@ -103,10 +103,10 @@ describe("request service", () => {
   it("updates request and resource statuses and validates them", async () => {
     const { app } = setup();
     const req = await request(app).post("/requests").send({ type: "food", location: "A" }).expect(201);
-    const upd = await request(app).put(`/requests/${req.body.id}/status`).send({ status: "IN_PROGRESS" }).expect(200);
-    expect(upd.body.status).toBe("IN_PROGRESS");
+    const upd = await request(app).put(`/requests/${req.body.id}/status`).send({ status: "CANCELLED" }).expect(200);
+    expect(upd.body.status).toBe("CANCELLED");
     await request(app).put(`/requests/${req.body.id}/status`).send({ status: "BOGUS" }).expect(400);
-    await request(app).put("/requests/missing/status").send({ status: "COMPLETED" }).expect(404);
+    await request(app).put("/requests/missing/status").send({ status: "CANCELLED" }).expect(404);
 
     const res = await request(app).post("/resources").send({ type: "food", location: "A" }).expect(201);
     const off = await request(app).put(`/resources/${res.body.id}/status`).send({ status: "UNAVAILABLE" }).expect(200);
@@ -142,12 +142,12 @@ describe("request service", () => {
   it("applies many concurrent status updates without losing the record", async () => {
     const { app } = setup();
     const req = await request(app).post("/requests").send({ type: "water", location: "A" }).expect(201);
-    const statuses = ["IN_PROGRESS", "ASSIGNED", "COMPLETED", "CANCELLED", "PENDING"];
-    const results = await Promise.all(statuses.map((status) => request(app).put(`/requests/${req.body.id}/status`).send({ status })));
+    const results = await Promise.all(
+      Array.from({ length: 8 }, () => request(app).put(`/requests/${req.body.id}/status`).send({ status: "CANCELLED" })),
+    );
     expect(results.every((r) => r.status === 200)).toBe(true);
     const final = await request(app).get(`/requests/${req.body.id}`).expect(200);
-    expect(statuses).toContain(final.body.status);
-    expect(final.body).toMatchObject({ id: req.body.id, type: "water", location: "A" });
+    expect(final.body).toMatchObject({ id: req.body.id, type: "water", location: "A", status: "CANCELLED" });
   });
 
   it("handles many simultaneous request creations", async () => {
