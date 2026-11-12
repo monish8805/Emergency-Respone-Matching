@@ -14,6 +14,8 @@ export interface EmergencyRequest {
   details: string;
   status: RequestStatus;
   resourceId: string | null;
+  // Distance to the assigned resource, when both locations were coordinates.
+  distanceKm?: number | null;
   createdAt: string;
 }
 
