@@ -20,6 +20,48 @@ type Logger = Pick<Console, "log" | "error">;
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
+export interface BrokerTimeouts {
+  // Give up connecting after this long (a stale Kubernetes ClusterIP can swallow SYNs for minutes).
+  connectTimeoutMs: number;
+  // Give up waiting for the broker to confirm a publish.
+  confirmTimeoutMs: number;
+  // After a failure, fail immediately for this long instead of waiting on the broker again.
+  backoffMs: number;
+}
+
+const DEFAULT_TIMEOUTS: BrokerTimeouts = { connectTimeoutMs: 5000, confirmTimeoutMs: 5000, backoffMs: 3000 };
+
+// amqplib disables heartbeats unless the URL asks for them, which means a silently dead
+// broker connection is never noticed. Ask for a 10 second heartbeat by default.
+function withHeartbeat(url: string): string {
+  try {
+    const u = new URL(url);
+    if (!u.searchParams.has("heartbeat")) u.searchParams.set("heartbeat", "10");
+    return u.toString();
+  } catch {
+    return url;
+  }
+}
+
+const connectBroker = (url: string, connectTimeoutMs: number) =>
+  amqp.connect(withHeartbeat(url), { timeout: connectTimeoutMs });
+
+function within<T>(promise: Promise<T>, ms: number, what: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`${what} timed out after ${ms} ms`)), ms);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (err) => {
+        clearTimeout(timer);
+        reject(err);
+      },
+    );
+  });
+}
+
 export async function assertTopology(ch: ConfirmChannel, retryDelayMs = RETRY_DELAY_MS): Promise<void> {
   await ch.assertQueue(MATCH_QUEUE, { durable: true });
   await ch.assertQueue(DEAD_QUEUE, { durable: true });
@@ -39,12 +81,17 @@ function confirmedSend(
   queue: string,
   content: Buffer,
   headers?: Record<string, unknown>,
+  timeoutMs = DEFAULT_TIMEOUTS.confirmTimeoutMs,
 ): Promise<void> {
-  return new Promise((resolve, reject) => {
-    ch.sendToQueue(queue, content, { persistent: true, contentType: "application/json", headers }, (err) =>
-      err ? reject(err) : resolve(),
-    );
-  });
+  return within(
+    new Promise<void>((resolve, reject) => {
+      ch.sendToQueue(queue, content, { persistent: true, contentType: "application/json", headers }, (err) =>
+        err ? reject(err) : resolve(),
+      );
+    }),
+    timeoutMs,
+    `publish to ${queue}`,
+  );
 }
 
 // Decides where a failed job goes next. Pure so it can be tested without a broker.
@@ -57,16 +104,23 @@ export function retryRoute(
 }
 
 // Publisher that connects lazily and reconnects after the broker goes away.
-// Startup never fails just because RabbitMQ is not up yet.
+// Startup never fails just because RabbitMQ is not up yet, and a broker outage never makes
+// callers wait: connecting and confirming are time-limited, and after a failure further
+// calls fail at once for a short while instead of waiting on the broker again.
 export class MatchPublisher {
   private conn: Conn | null = null;
   private ch: ConfirmChannel | null = null;
   private opening: Promise<ConfirmChannel> | null = null;
+  private failedAt = 0;
+  private readonly timeouts: BrokerTimeouts;
 
   constructor(
     private readonly url: string,
     private readonly log: Logger = console,
-  ) {}
+    timeouts: Partial<BrokerTimeouts> = {},
+  ) {
+    this.timeouts = { ...DEFAULT_TIMEOUTS, ...timeouts };
+  }
 
   private reset(): void {
     const conn = this.conn;
@@ -75,13 +129,17 @@ export class MatchPublisher {
     conn?.close().catch(() => {});
   }
 
+  private recentlyFailed(): boolean {
+    return this.failedAt > 0 && Date.now() - this.failedAt < this.timeouts.backoffMs;
+  }
+
   private open(): Promise<ConfirmChannel> {
     if (this.ch) return Promise.resolve(this.ch);
     this.opening ??= (async () => {
       try {
-        const conn = await amqp.connect(this.url);
-        const ch = await conn.createConfirmChannel();
-        await assertTopology(ch);
+        const conn = await connectBroker(this.url, this.timeouts.connectTimeoutMs);
+        const ch = await within(conn.createConfirmChannel(), this.timeouts.connectTimeoutMs, "opening channel");
+        await within(assertTopology(ch), this.timeouts.connectTimeoutMs, "declaring queues");
         const lost = (why: string) => (err?: unknown) => {
           if (this.conn !== conn) return;
           this.log.error(`RabbitMQ publisher ${why}`, err ?? "");
@@ -93,7 +151,11 @@ export class MatchPublisher {
         ch.on("error", lost("channel error"));
         this.conn = conn;
         this.ch = ch;
+        this.failedAt = 0;
         return ch;
+      } catch (err) {
+        this.failedAt = Date.now();
+        throw err;
       } finally {
         this.opening = null;
       }
@@ -102,23 +164,29 @@ export class MatchPublisher {
   }
 
   async publish(message: MatchMessage): Promise<void> {
+    if (this.recentlyFailed()) throw new Error("RabbitMQ unavailable (a recent attempt failed)");
     const content = Buffer.from(JSON.stringify(message));
     let lastError: unknown;
     for (let attempt = 0; attempt < 2; attempt++) {
+      // A second try only makes sense if the first used a connection that may have gone stale.
+      const hadConnection = this.ch !== null;
       try {
         const ch = await this.open();
-        await confirmedSend(ch, MATCH_QUEUE, content);
+        await confirmedSend(ch, MATCH_QUEUE, content, undefined, this.timeouts.confirmTimeoutMs);
         return;
       } catch (err) {
         lastError = err;
         this.reset();
+        if (!hadConnection) break;
       }
     }
+    this.failedAt = Date.now();
     throw lastError;
   }
 
   // True when a broker connection can be established right now.
   async check(): Promise<boolean> {
+    if (this.recentlyFailed()) return false;
     try {
       await this.open();
       return true;
@@ -192,7 +260,7 @@ export function startMatchConsumer(
   async function loop() {
     while (!stopped) {
       try {
-        const c = await amqp.connect(url);
+        const c = await connectBroker(url, DEFAULT_TIMEOUTS.connectTimeoutMs);
         conn = c;
         const ch = await c.createConfirmChannel();
         await assertTopology(ch);

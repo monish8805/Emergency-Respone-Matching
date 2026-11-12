@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import amqp from "amqplib";
+import net from "node:net";
 import {
   DEAD_QUEUE,
   MATCH_QUEUE,
@@ -17,6 +18,48 @@ describe("retryRoute", () => {
     expect(retryRoute(0, 3)).toEqual({ queue: RETRY_QUEUE, attempts: 1 });
     expect(retryRoute(1, 3)).toEqual({ queue: RETRY_QUEUE, attempts: 2 });
     expect(retryRoute(2, 3)).toEqual({ queue: DEAD_QUEUE, attempts: 3 });
+  });
+});
+
+const silent = { log: () => {}, error: () => {} };
+
+describe("MatchPublisher when the broker is unreachable or never answers", () => {
+  it("gives up quickly on a broker that accepts connections but never speaks AMQP", async () => {
+    // Like a stale Kubernetes ClusterIP: the TCP connection opens, nothing ever comes back.
+    const sockets: net.Socket[] = [];
+    const server = net.createServer((socket) => void sockets.push(socket));
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const { port } = server.address() as net.AddressInfo;
+    const publisher = new MatchPublisher(`amqp://127.0.0.1:${port}`, silent, {
+      connectTimeoutMs: 300,
+      confirmTimeoutMs: 300,
+      backoffMs: 1000,
+    });
+    try {
+      const start = Date.now();
+      await expect(publisher.publish({ requestId: "x" })).rejects.toThrow();
+      expect(Date.now() - start).toBeLessThan(2500);
+    } finally {
+      sockets.forEach((socket) => socket.destroy());
+      server.close();
+    }
+  });
+
+  it("fails immediately for a short while after a failure instead of waiting again", async () => {
+    const publisher = new MatchPublisher("amqp://127.0.0.1:1", silent, { backoffMs: 500 });
+    await expect(publisher.publish({ requestId: "x" })).rejects.toThrow();
+    const start = Date.now();
+    await expect(publisher.publish({ requestId: "y" })).rejects.toThrow(/recent attempt failed/);
+    expect(await publisher.check()).toBe(false);
+    expect(Date.now() - start).toBeLessThan(100);
+  });
+
+  it("tries to connect again once the back-off has passed", async () => {
+    const publisher = new MatchPublisher("amqp://127.0.0.1:1", silent, { backoffMs: 150 });
+    await expect(publisher.publish({ requestId: "x" })).rejects.toThrow();
+    await new Promise((r) => setTimeout(r, 200));
+    // Not the fast-fail error any more: it really attempted to reach the broker.
+    await expect(publisher.publish({ requestId: "y" })).rejects.not.toThrow(/recent attempt failed/);
   });
 });
 
