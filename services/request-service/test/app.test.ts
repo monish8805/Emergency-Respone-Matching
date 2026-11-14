@@ -100,6 +100,16 @@ describe("request service", () => {
     expect(res.body.status).toBe("UNAVAILABLE");
   });
 
+  it("gives a resource an id that carries its type and stores it under that type", async () => {
+    const { app, store } = setup();
+    const res = await request(app).post("/resources").send({ type: "medicine", location: "A" }).expect(201);
+    expect(res.body.id.startsWith("medicine-")).toBe(true);
+    expect(await store.list("resource:medicine:")).toHaveLength(1);
+    expect(await store.list("resource:water:")).toHaveLength(0);
+    const all = await request(app).get("/resources").expect(200);
+    expect(all.body).toHaveLength(1);
+  });
+
   it("updates request and resource statuses and validates them", async () => {
     const { app } = setup();
     const req = await request(app).post("/requests").send({ type: "food", location: "A" }).expect(201);

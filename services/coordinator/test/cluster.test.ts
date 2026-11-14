@@ -127,6 +127,14 @@ describe("sharding and replication", () => {
     expect(res.body).toHaveLength(12);
     expect(res.body.every((e: { version: number }) => e.version > 0)).toBe(true);
   });
+
+  it("lists only one type when the prefix names it", async () => {
+    for (let i = 0; i < 6; i++) await putKey(`resource:water:w-${i}`, { i });
+    for (let i = 0; i < 6; i++) await putKey(`resource:food:f-${i}`, { i });
+    const res = await request(coordinator).get("/internal/list").query({ prefix: "resource:water:" }).expect(200);
+    expect(res.body).toHaveLength(6);
+    expect(res.body.every((e: { key: string }) => e.key.startsWith("resource:water:"))).toBe(true);
+  });
 });
 
 describe("compare-and-set", () => {

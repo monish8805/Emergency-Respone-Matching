@@ -24,6 +24,9 @@ export const Route = createFileRoute("/")({ component: Home });
 
 const POLL_MS = 3000;
 
+// A resource id starts with its type ("water-9f3a…"), so the part worth showing is the unique tail.
+const shortId = (id: string) => id.slice(id.indexOf("-") + 1, id.indexOf("-") + 9);
+
 // While nothing has loaded yet, TanStack Query clears a query's error every time it starts the next
 // poll, so a plain `query.error` flashes on for a moment and off again. This keeps the last error
 // on screen until a load actually succeeds.
@@ -85,7 +88,7 @@ function Home() {
   const resourceLabel = (id: string | null) => {
     if (!id) return "—";
     const r = resourceList.find((x) => x.id === id);
-    return r ? `${r.type} @ ${r.location} (${id.slice(0, 8)})` : id.slice(0, 8);
+    return r ? `${r.type} @ ${r.location} (${shortId(id)})` : shortId(id);
   };
 
   return (
@@ -191,7 +194,7 @@ function Home() {
                   />
                 </td>
                 <td>{requestLabel(r.assignedRequestId)}</td>
-                <td className="mono">{r.id.slice(0, 8)}</td>
+                <td className="mono">{shortId(r.id)}</td>
               </tr>
             ))}
           </tbody>

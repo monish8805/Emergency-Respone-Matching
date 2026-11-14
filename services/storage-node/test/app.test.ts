@@ -43,6 +43,18 @@ describe("storage node", () => {
     expect(res.body).toEqual([["a", { v: 1 }, 7]]);
   });
 
+  it("dumps only the keys with a given prefix", async () => {
+    const { app } = createStorageApp("s0-primary", 0);
+    await put(app, "resource:water:1", { v: 1 }, 1);
+    await put(app, "resource:food:2", { v: 2 }, 2);
+    await put(app, "request:3", { v: 3 }, 3);
+    const water = await request(app).get("/internal/dump").query({ prefix: "resource:water:" }).expect(200);
+    expect(water.body).toEqual([["resource:water:1", { v: 1 }, 1]]);
+    const resources = await request(app).get("/internal/dump").query({ prefix: "resource:" }).expect(200);
+    expect(resources.body).toHaveLength(2);
+    expect((await request(app).get("/internal/dump").expect(200)).body).toHaveLength(3);
+  });
+
   it("keeps data across a restart when a data file is configured", async () => {
     const dir = mkdtempSync(join(tmpdir(), "storage-"));
     try {

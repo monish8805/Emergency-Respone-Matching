@@ -3,6 +3,7 @@ import {
   MemoryStore,
   requestKey,
   resourceKey,
+  newResourceId,
   type EmergencyRequest,
   type RequestType,
   type Resource,
@@ -17,7 +18,7 @@ async function addRequest(store: MemoryStore, type: RequestType, location: strin
   return r;
 }
 async function addResource(store: MemoryStore, type: RequestType, location: string) {
-  const r: Resource = { id: `res-${++counter}`, type, location, availability: true, status: "AVAILABLE", assignedRequestId: null };
+  const r: Resource = { id: newResourceId(type, `res-${++counter}`), type, location, availability: true, status: "AVAILABLE", assignedRequestId: null };
   await store.put(resourceKey(r.id), r);
   return r;
 }
@@ -32,6 +33,18 @@ describe("processMatch", () => {
     expect(await processMatch(req.id, store)).toBe("assigned");
     expect(await request(store, req.id)).toMatchObject({ status: "ASSIGNED", resourceId: res.id });
     expect(await resource(store, res.id)).toMatchObject({ status: "ASSIGNED", availability: false, assignedRequestId: req.id });
+  });
+
+  it("only reads resources of the request's own type", async () => {
+    const store = new MemoryStore();
+    await addResource(store, "water", "Zone A");
+    await addResource(store, "food", "Zone A");
+    const req = await addRequest(store, "food", "Zone A");
+    const prefixes: string[] = [];
+    const list = store.list.bind(store);
+    store.list = (async (prefix: string) => (prefixes.push(prefix), list(prefix))) as typeof store.list;
+    expect(await processMatch(req.id, store)).toBe("assigned");
+    expect(prefixes).toEqual(["resource:food:"]);
   });
 
   it("leaves the request PENDING when nothing matches", async () => {

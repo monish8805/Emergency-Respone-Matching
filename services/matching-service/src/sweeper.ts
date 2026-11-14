@@ -1,7 +1,7 @@
 import {
   DEFAULT_RADIUS_KM,
   REQUEST_PREFIX,
-  RESOURCE_PREFIX,
+  resourcePrefix,
   rankMatches,
   type EmergencyRequest,
   type KeyValueStore,
@@ -30,7 +30,11 @@ export async function sweepPending(
     .filter((r) => r.status === "PENDING" && now() - Date.parse(r.createdAt) >= minAgeMs);
   if (requests.length === 0) return 0;
 
-  const resources = (await store.list<Resource>(RESOURCE_PREFIX)).map((e) => e.value);
+  // Only the types somebody is waiting for are fetched.
+  const types = [...new Set(requests.map((r) => r.type))];
+  const resources = (await Promise.all(types.map((t) => store.list<Resource>(resourcePrefix(t)))))
+    .flat()
+    .map((e) => e.value);
   let queued = 0;
   for (const request of requests) {
     const halfClaimed = resources.some((r) => r.assignedRequestId === request.id && r.status === "ASSIGNED");

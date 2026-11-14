@@ -34,6 +34,10 @@ A location is either a **zone name** (`Zone A`) or **coordinates** (`12.97, 77.5
 - A zone name matches only the same zone name (case-insensitive).
 - A zone name never matches coordinates, and the other way round.
 
+### How data is keyed
+
+Requests are stored as `request:<uuid>`. Resources are stored as `resource:<type>:<uuid>`, and a resource id is `<type>-<uuid>` (for example `water-9f3a…`), so the type is part of the key and an id alone is enough to find it. Listing takes a key prefix and each storage node applies it itself, so the matcher asks for `resource:water:` and receives only water resources instead of every record on every shard. (The resource list in the UI asks for all types.) Data written with the older `resource:<uuid>` keys is not found by the new code: reset the volumes (`docker compose down -v`, or delete the namespace on Kubernetes) after upgrading.
+
 ### Status rules
 
 A request moves forward only: `PENDING → ASSIGNED` is done by the matcher (never by hand), then `IN_PROGRESS`, `COMPLETED`, and any non-finished request can be `CANCELLED`. `COMPLETED` and `CANCELLED` are final. The API answers `409` with the allowed next statuses for anything else, and the UI only offers valid choices.
@@ -110,6 +114,7 @@ See `docs/DEMO.md` for the demonstration script.
 - **Single coordinator.** It serializes writes per key and holds node health in memory. If it is down, the API returns 503 until it restarts (storage data is unaffected). Running several coordinators would need a consensus layer.
 - **No quorum.** With replication factor 2, if one node is down the other is the only copy and serves alone. Two simultaneous node losses in one shard make that shard unavailable (data is safe on disk and returns when the nodes do).
 - Record versions follow the coordinator's clock. If a restarted coordinator's clock is behind the stored versions, it detects the refused write and moves past the newer version, so no write is lost (covered by tests). Ordering between *different* coordinators is not defined: run one.
+- Listing still asks every shard (the type is in the key, not in the hash), so a lookup touches all three shards but each returns only the matching records. Placing a type on one shard would avoid that, at the cost of hotspots.
 - Distance matching uses a straight-line (haversine) distance, not road distance, and one fixed radius for every request type.
 - Storage persistence rewrites the node's snapshot on each write: fine for a demo, not for large data sets.
 - Changing the RabbitMQ queue topology on an existing broker with old queues requires deleting those queues.

@@ -114,8 +114,8 @@ export function createCoordinatorApp(registry: NodeRegistry) {
   // write that arrives mid-sync can never be overwritten by an older copy.
   const syncing = new Set<string>();
 
-  async function dumpOf(node: NodeConfig): Promise<Array<[string, unknown, number]> | null> {
-    const r = await call(node, "GET", "/internal/dump");
+  async function dumpOf(node: NodeConfig, prefix = ""): Promise<Array<[string, unknown, number]> | null> {
+    const r = await call(node, "GET", `/internal/dump${prefix ? `?prefix=${encodeURIComponent(prefix)}` : ""}`);
     return r?.ok ? ((await r.json()) as Array<[string, unknown, number]>) : null;
   }
 
@@ -259,11 +259,10 @@ export function createCoordinatorApp(registry: NodeRegistry) {
     for (let shard = 0; shard < registry.shardCount(); shard++) {
       let answered = false;
       for (const node of registry.liveNodes(shard)) {
-        const dump = await dumpOf(node);
+        // The node applies the prefix itself, so only matching records cross the network.
+        const dump = await dumpOf(node, prefix);
         if (!dump) continue;
-        for (const [key, value, version] of dump) {
-          if (key.startsWith(prefix)) found.push({ key, value, version });
-        }
+        for (const [key, value, version] of dump) found.push({ key, value, version });
         answered = true;
         break;
       }

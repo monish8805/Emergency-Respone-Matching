@@ -49,8 +49,13 @@ export function createStorageApp(nodeId: string, shard: number, options: Storage
   });
 
   // Used by the coordinator to reconcile a node that has just recovered: [key, value, version].
-  app.get("/internal/dump", (_req, res) => {
-    res.json([...data.entries()].map(([key, e]) => [key, e.value, e.version]));
+  // With ?prefix=... only the keys starting with it are returned, so a caller that wants one kind
+  // of record does not have to receive (and then throw away) everything else.
+  app.get("/internal/dump", (req, res) => {
+    const prefix = typeof req.query.prefix === "string" ? req.query.prefix : "";
+    res.json(
+      [...data.entries()].filter(([key]) => key.startsWith(prefix)).map(([key, e]) => [key, e.value, e.version]),
+    );
   });
 
   app.get("/internal/data/:key", (req, res) => {

@@ -6,6 +6,7 @@ import {
   requestKey,
   requestStatusSchema,
   resourceKey,
+  newResourceId,
   resourceStatusSchema,
   REQUEST_PREFIX,
   RESOURCE_PREFIX,
@@ -102,7 +103,7 @@ export function createRequestApp({ store, publishMatch, checkRabbit, coordinator
     if (!parsed.success) return invalid(res, parsed.error);
     const { availability, ...rest } = parsed.data;
     const record: Resource = {
-      id: randomUUID(),
+      id: newResourceId(rest.type, randomUUID()),
       ...rest,
       availability,
       status: availability ? "AVAILABLE" : "UNAVAILABLE",

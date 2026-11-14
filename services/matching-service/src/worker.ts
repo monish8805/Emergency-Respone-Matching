@@ -3,7 +3,7 @@ import {
   rankMatches,
   requestKey,
   resourceKey,
-  RESOURCE_PREFIX,
+  resourcePrefix,
   updateRecord,
   type EmergencyRequest,
   type KeyValueStore,
@@ -29,7 +29,7 @@ export async function processMatch(
   if (!current || current.value.status !== "PENDING") return "skipped";
   const request = current.value;
 
-  const entries = await store.list<Resource>(RESOURCE_PREFIX);
+  const entries = await store.list<Resource>(resourcePrefix(request.type));
 
   // A previous attempt may have claimed a resource and died before updating the request.
   const claimed = entries.find((e) => e.value.assignedRequestId === request.id && e.value.status === "ASSIGNED");
