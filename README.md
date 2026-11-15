@@ -14,16 +14,16 @@ Browser ─► Web UI (TanStack Start, :3000)
                                         hash(key) mod 3
                               ┌───────────┼───────────┐
                          Shard 0      Shard 1      Shard 2
-                        primary+replica  …            …
+                        3 nodes, quorum 2  …     …
 ```
 
 | Component | Role |
 |---|---|
 | **Web UI** (3000) | Create requests, register resources, view and update both, trigger matching, see service/shard health. Its server functions call the Request Service, so the browser never talks to the backend directly. |
-| **Request Service** (3005) | Public REST API. Validates with Zod, stores via the coordinator, publishes match jobs to RabbitMQ. |
+| **Request Service** (3005) | Public REST API. Validates with Zod (locations, sizes, idempotency keys), stores via the coordinator, publishes match jobs to RabbitMQ. |
 | **Matching Service** | Consumes match jobs, claims resources atomically, and periodically re-queues requests that are still `PENDING`. |
-| **Coordinator** (3006) | Routes every key to `hash(key) mod 3`, replicates each write to the shard's primary and replica, serializes changes per key, offers compare-and-set, tracks heartbeats and reconciles recovered nodes. Internal: bound to localhost in Compose, ClusterIP-only in Kubernetes. |
-| **Storage nodes** | 3 shards × (primary + replica). Versioned key-value store with optional on-disk persistence. |
+| **Coordinator** (3006) | Routes every key to `hash(key) mod 3`, replicates each write to the shard's three nodes and needs a majority (2 of 3) to acknowledge it, serializes changes per key, offers compare-and-set, tracks heartbeats and reconciles recovered nodes. Internal: bound to localhost in Compose, ClusterIP-only in Kubernetes. Kubernetes runs two with leader election (one active). |
+| **Storage nodes** | 3 shards × 3 nodes. Versioned key-value store with optional on-disk persistence. |
 | **RabbitMQ** | Durable queue `match.requests`, delayed retry queue `match.retry`, dead-letter queue `match.requests.dlq`. |
 
 ### Locations and matching
@@ -47,7 +47,11 @@ If a resource that is serving a request is set to `AVAILABLE` or `UNAVAILABLE`, 
 ### How the hard parts work
 
 - **No double assignment.** The coordinator versions every record. The matcher claims a resource with compare-and-set (`POST /internal/cas/:key`), so when requests race for one resource exactly one wins and the others move on. The claim stores the owning request id, so a matcher that crashes mid-assignment is completed (not leaked) by the next attempt.
-- **Replication and failover.** Writes go to every live node in the shard. Reads use the first live node (the primary), falling back to the replica. A failed call or missing heartbeat marks the node `down`.
+- **Quorum replication.** Every shard has three nodes. A write goes to all live nodes and is acknowledged only when 2 of 3 hold it. A read asks every live node, needs 2 of 3 to answer and returns the newest version, so it always sees the latest acknowledged write. One node down changes nothing for clients. Two down makes the shard refuse reads and writes (503) instead of answering from a single copy; nothing is lost, the data is on disk and the shard returns when a node does. A failed call or missing heartbeat marks a node `down`. A write is refused up front when fewer than 2 nodes are reachable, so it is not left behind on the one node that was.
+- **Coordinator failover.** Kubernetes runs two coordinators that compete for a `Lease` object. Only the holder is Ready, so the Service (and every heartbeat) goes to it. If it dies, the other takes the lease after at most 15 seconds, starts with every node marked `syncing` and reconciles them, exactly like a restart. A leader that cannot renew steps down after 9 seconds, before the lease can be taken, and a shutting-down leader hands the lease over immediately. Compose runs a single coordinator.
+- **Safe retries (idempotency).** `POST /requests` and `POST /resources` accept an `Idempotency-Key` header (8-100 characters of letters, digits, `_`, `-`). The key decides the record's id and the record is created with a create-only write, so repeating a call with the same key never makes a second record: it returns the existing one with `200` and `idempotent-replay: true`. This covers a double click, a client that retries after a timeout, and a 503 whose write nevertheless reached some nodes. The UI sends a fresh key per submission, disables the button while sending, and reuses the key if it has to retry after an error. The same key with a different body is `409`.
+- **Pagination.** `GET /requests` and `GET /resources` return `{ items, nextCursor, total }`. Use `?limit=` (1-200, default 50) and pass `nextCursor` back as `?cursor=`. Requests are newest first, resources are ordered by id, and `GET /resources?type=water` lists one type. Cursors name the last record seen, so rows added between pages are never skipped or repeated. The UI shows 25 per page and polls only the page on screen.
+- **Input checks.** A location must be valid coordinates (`-90..90`, `-180..180`) or a zone name: starts with a letter, letters/digits/spaces and `. ' _ -`, at most 60 characters. `91, 10`, `123` or `!!!` are rejected with `400`. Optionally set `ZONES="Zone A,Zone B"` on the request service to accept only those zones (plus coordinates), which is the only way to refuse a plausible but unknown name like `asdf`. Bodies are capped at 100 KB (`413 request body too large (limit 100 KB)`); malformed JSON gets `400 malformed request body`.
 - **Recovery without stale reads.** A node that comes back is `syncing`: it receives new writes but serves no reads until it has been reconciled with its peer. Reconciliation runs per key under that key's lock and the higher version wins in both directions, so an old copy can never overwrite a newer write.
 - **Durability.** With `DATA_DIR` set (Compose volumes / Kubernetes PVCs) each node persists its data, so even losing both nodes of a shard at once loses nothing.
 - **Reliable messaging.** Publishes wait for broker confirms and reconnect after broker restarts. Failed jobs go to a delayed retry queue (5 attempts) then the dead-letter queue. If a publish fails, the request stays `PENDING` and the matcher's sweeper re-queues it, so nothing is stuck. Connecting and confirming are time-limited and heartbeats are on, so a broker outage never makes the API hang: it answers at once with `x-match-queued: false`. The sweeper only re-queues requests a free resource could actually serve, so unmatchable requests cost nothing.
@@ -73,9 +77,9 @@ API: `POST/GET /requests`, `GET /requests/:id`, `PUT /requests/:id/status`, `POS
 ### Simulate shard failure and recovery
 
 ```bash
-docker kill $(docker compose ps -q storage-s0-primary)   # the replica keeps serving reads and writes
+docker kill $(docker compose ps -q storage-s0-a)   # the other two nodes keep serving reads and writes
 curl localhost:3005/system | jq '.coordinator.shards'
-docker compose start storage-s0-primary         # it reconciles with its replica, then rejoins
+docker compose start storage-s0-a                 # it reconciles with its peers, then rejoins
 # Note: `docker kill` counts as a manual stop, so Docker will NOT restart it for you. A real crash is restarted automatically.
 docker compose logs coordinator | tail          # "reconciled ... node ... is up"
 ```
@@ -87,12 +91,14 @@ docker compose logs coordinator | tail          # "reconciled ... node ... is up
 minikube service web -n emergency    # open the UI
 ```
 
-Storage is three StatefulSets (one per shard, two pods each, each with a volume). RabbitMQ is a StatefulSet with a volume. The Request Service, Matching Service and Web are Deployments and scale with `kubectl scale`. The coordinator is a single replica by design. Non-secret settings live in a ConfigMap. The RabbitMQ credentials are a Secret that `scripts/deploy-k8s.sh` creates with a random password the first time it runs (and keeps afterwards), so no password is stored in git. Storage nodes prefer different machines (soft anti-affinity) and PodDisruptionBudgets stop a node drain from taking both nodes of a shard down.
+Storage is three StatefulSets (one per shard, three pods each, each with a volume). RabbitMQ is a StatefulSet with a volume. The Request Service, Matching Service and Web are Deployments and scale with `kubectl scale`. The coordinator runs two pods with leader election (`k8s/21-coordinator-rbac.yaml` gives them access to one Lease). Non-secret settings live in a ConfigMap. The RabbitMQ credentials are a Secret that `scripts/deploy-k8s.sh` creates with a random password the first time it runs (and keeps afterwards), so no password is stored in git. Storage nodes prefer different machines (soft anti-affinity) and PodDisruptionBudgets stop a node drain from taking more than one node of a shard (or one coordinator) down.
+
+**Hardening and scaling.** Every container built here runs as the unprivileged `node` user (uid 1000) with all Linux capabilities dropped and privilege escalation off; Compose does the same (`cap_drop`, `no-new-privileges`) and RabbitMQ runs as uid 999. `k8s/80-network-policies.yaml` denies all ingress by default and opens only the real paths (the UI and API from outside; coordinator only from the services and storage nodes; storage only from the coordinator; RabbitMQ's AMQP port only from the two services, not its management port). NetworkPolicy needs a network plugin that enforces it, so `deploy-k8s.sh` starts minikube with Calico and warns if the cluster has none. `k8s/70-autoscaling.yaml` scales the request service (2-6), matching service (1-4) and web (1-4) on CPU through metrics-server, which the script enables.
 
 Simulate failures:
 
 ```bash
-kubectl -n emergency delete pod storage-s0-0 --force --grace-period=0   # shard failure, replica serves
+kubectl -n emergency delete pod storage-s0-0 --force --grace-period=0   # shard failure, the other two nodes serve
 kubectl -n emergency delete pod -l app=request-service                  # pod failure, Kubernetes recreates it
 kubectl -n emergency scale deploy/request-service --replicas=4          # scaling
 ```
@@ -111,8 +117,10 @@ See `docs/DEMO.md` for the demonstration script.
 
 ## Limitations
 
-- **Single coordinator.** It serializes writes per key and holds node health in memory. If it is down, the API returns 503 until it restarts (storage data is unaffected). Running several coordinators would need a consensus layer.
-- **No quorum.** With replication factor 2, if one node is down the other is the only copy and serves alone. Two simultaneous node losses in one shard make that shard unavailable (data is safe on disk and returns when the nodes do).
+- **One active coordinator.** Two run on Kubernetes, but only the lease holder works; the other is a standby, so there is no extra throughput. For up to 15 seconds after the leader dies the API returns 503. Per-key locking and node health live in the leader's memory, so ordering relies on there being exactly one leader: the lease and the 9 s step-down keep that true unless a pod is frozen for longer than the lease and clocks misbehave. The storage nodes' version check limits the damage but is not a consensus protocol. Compose runs a single coordinator.
+- **Quorum is per shard, majority of three.** One node may be down; two make the shard unavailable. A write that fails halfway (a node believed up that fails mid-write) can still be stored on the one node that took it. The API answers 503 in that case, and an `Idempotency-Key` makes the retry safe, but a read can later return that value once the nodes are back.
+- **Idempotency is opt-in per call.** Without the header every call creates a new record, as before. Pagination is applied by the Request Service after it reads the list from the coordinator, so it saves the browser's bandwidth but each page request still reads all records from storage.
+- **Zone names are free text** unless `ZONES` is set: `asdf` is a well-formed zone name and is accepted by default.
 - Record versions follow the coordinator's clock. If a restarted coordinator's clock is behind the stored versions, it detects the refused write and moves past the newer version, so no write is lost (covered by tests). Ordering between *different* coordinators is not defined: run one.
 - Listing still asks every shard (the type is in the key, not in the hash), so a lookup touches all three shards but each returns only the matching records. Placing a type on one shard would avoid that, at the cost of hotspots.
 - Distance matching uses a straight-line (haversine) distance, not road distance, and one fixed radius for every request type.
