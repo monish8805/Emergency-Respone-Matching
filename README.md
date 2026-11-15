@@ -1,4 +1,4 @@
-# Distributed Emergency Resource Matching System
+# Distributed Emergency Resource Matching System 
 
 A containerized system that matches emergency requests (water, food, medicine, transportation, shelter) with available resources. Storage is sharded and replicated, matching runs asynchronously through RabbitMQ, and the whole thing runs on Docker Compose or Kubernetes (minikube).
 
