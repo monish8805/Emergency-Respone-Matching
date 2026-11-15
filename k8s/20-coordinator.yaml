@@ -4,28 +4,47 @@ metadata:
   name: coordinator
   namespace: emergency
 spec:
-  # One replica on purpose: it serializes writes per key and tracks node health in memory.
-  replicas: 1
+  # Two coordinators, one active. They compete for a Lease (see 21-coordinator-rbac.yaml); only the
+  # holder is "ready", so the Service sends all traffic to it, and the other takes over within about
+  # 15 seconds if the leader dies. Two leaders at once is prevented by the lease, not by Recreate.
+  replicas: 2
   strategy:
-    type: Recreate   # never run two coordinators side by side during a rollout
+    type: RollingUpdate
+    rollingUpdate: {maxUnavailable: 1, maxSurge: 1}
   selector:
     matchLabels: {app: coordinator}
   template:
     metadata:
       labels: {app: coordinator}
     spec:
+      serviceAccountName: coordinator
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000          # so the volume of a storage node is writable by the non-root user
+        seccompProfile: {type: RuntimeDefault}
       containers:
         - name: coordinator
           image: emergency/coordinator:latest
           imagePullPolicy: Never
           env:
             - {name: PORT, value: "3006"}
+            - {name: LEADER_ELECTION, value: kubernetes}
+            - {name: LEASE_NAME, value: coordinator}
+            - {name: LEASE_SECONDS, value: "15"}
+            - name: POD_NAME
+              valueFrom: {fieldRef: {fieldPath: metadata.name}}
+            - name: POD_NAMESPACE
+              valueFrom: {fieldRef: {fieldPath: metadata.namespace}}
+            # Trust the cluster CA so the Lease API (https) can be called.
+            - {name: NODE_EXTRA_CA_CERTS, value: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt}
           envFrom:
             - configMapRef: {name: app-config}
           ports:
             - {containerPort: 3006}
           readinessProbe:
-            httpGet: {path: /health, port: 3006}
+            httpGet: {path: /ready, port: 3006}   # 200 only on the leader
             periodSeconds: 3
             failureThreshold: 3
           livenessProbe:
@@ -33,6 +52,9 @@ spec:
             initialDelaySeconds: 15
             periodSeconds: 10
             failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
           resources:
             requests: {cpu: 50m, memory: 96Mi}
             limits: {memory: 256Mi}

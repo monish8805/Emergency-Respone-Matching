@@ -13,5 +13,5 @@ data:
   MATCH_RADIUS_KM: "5"
   SWEEP_MS: "15000"
   SWEEP_MIN_AGE_MS: "10000"
-  # The shard layout: 3 shards, each with two pods (the first is the primary).
-  STORAGE_NODES: '[{"id":"storage-s0-0","shard":0,"url":"http://storage-s0-0.storage-s0:4000"},{"id":"storage-s0-1","shard":0,"url":"http://storage-s0-1.storage-s0:4000"},{"id":"storage-s1-0","shard":1,"url":"http://storage-s1-0.storage-s1:4000"},{"id":"storage-s1-1","shard":1,"url":"http://storage-s1-1.storage-s1:4000"},{"id":"storage-s2-0","shard":2,"url":"http://storage-s2-0.storage-s2:4000"},{"id":"storage-s2-1","shard":2,"url":"http://storage-s2-1.storage-s2:4000"}]'
+  # The shard layout: 3 shards, each with three pods. A write or read needs 2 of the 3 (a majority).
+  STORAGE_NODES: '[{"id":"storage-s0-0","shard":0,"url":"http://storage-s0-0.storage-s0:4000"},{"id":"storage-s0-1","shard":0,"url":"http://storage-s0-1.storage-s0:4000"},{"id":"storage-s0-2","shard":0,"url":"http://storage-s0-2.storage-s0:4000"},{"id":"storage-s1-0","shard":1,"url":"http://storage-s1-0.storage-s1:4000"},{"id":"storage-s1-1","shard":1,"url":"http://storage-s1-1.storage-s1:4000"},{"id":"storage-s1-2","shard":1,"url":"http://storage-s1-2.storage-s1:4000"},{"id":"storage-s2-0","shard":2,"url":"http://storage-s2-0.storage-s2:4000"},{"id":"storage-s2-1","shard":2,"url":"http://storage-s2-1.storage-s2:4000"},{"id":"storage-s2-2","shard":2,"url":"http://storage-s2-2.storage-s2:4000"}]'

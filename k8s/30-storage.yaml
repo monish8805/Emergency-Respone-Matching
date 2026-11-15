@@ -18,7 +18,7 @@ metadata:
   namespace: emergency
 spec:
   serviceName: storage-s0
-  replicas: 2
+  replicas: 3
   podManagementPolicy: Parallel
   selector:
     matchLabels: {app: storage, shard: "0"}
@@ -26,8 +26,14 @@ spec:
     metadata:
       labels: {app: storage, shard: "0"}
     spec:
-      # Prefer putting the two nodes of a shard on different machines, so one machine failing
-      # cannot take out both copies. "Preferred" so a single-node cluster (minikube) still schedules.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000          # so the volume of a storage node is writable by the non-root user
+        seccompProfile: {type: RuntimeDefault}
+      # Prefer putting the three nodes of a shard on different machines, so one machine failing
+      # cannot take out a majority. "Preferred" so a single-node cluster (minikube) still schedules.
       affinity:
         podAntiAffinity:
           preferredDuringSchedulingIgnoredDuringExecution:
@@ -59,6 +65,9 @@ spec:
             initialDelaySeconds: 15
             periodSeconds: 10
             failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
           resources:
             requests: {cpu: 50m, memory: 96Mi}
             limits: {memory: 256Mi}
@@ -92,7 +101,7 @@ metadata:
   namespace: emergency
 spec:
   serviceName: storage-s1
-  replicas: 2
+  replicas: 3
   podManagementPolicy: Parallel
   selector:
     matchLabels: {app: storage, shard: "1"}
@@ -100,8 +109,14 @@ spec:
     metadata:
       labels: {app: storage, shard: "1"}
     spec:
-      # Prefer putting the two nodes of a shard on different machines, so one machine failing
-      # cannot take out both copies. "Preferred" so a single-node cluster (minikube) still schedules.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000          # so the volume of a storage node is writable by the non-root user
+        seccompProfile: {type: RuntimeDefault}
+      # Prefer putting the three nodes of a shard on different machines, so one machine failing
+      # cannot take out a majority. "Preferred" so a single-node cluster (minikube) still schedules.
       affinity:
         podAntiAffinity:
           preferredDuringSchedulingIgnoredDuringExecution:
@@ -133,6 +148,9 @@ spec:
             initialDelaySeconds: 15
             periodSeconds: 10
             failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
           resources:
             requests: {cpu: 50m, memory: 96Mi}
             limits: {memory: 256Mi}
@@ -166,7 +184,7 @@ metadata:
   namespace: emergency
 spec:
   serviceName: storage-s2
-  replicas: 2
+  replicas: 3
   podManagementPolicy: Parallel
   selector:
     matchLabels: {app: storage, shard: "2"}
@@ -174,8 +192,14 @@ spec:
     metadata:
       labels: {app: storage, shard: "2"}
     spec:
-      # Prefer putting the two nodes of a shard on different machines, so one machine failing
-      # cannot take out both copies. "Preferred" so a single-node cluster (minikube) still schedules.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000          # so the volume of a storage node is writable by the non-root user
+        seccompProfile: {type: RuntimeDefault}
+      # Prefer putting the three nodes of a shard on different machines, so one machine failing
+      # cannot take out a majority. "Preferred" so a single-node cluster (minikube) still schedules.
       affinity:
         podAntiAffinity:
           preferredDuringSchedulingIgnoredDuringExecution:
@@ -207,6 +231,9 @@ spec:
             initialDelaySeconds: 15
             periodSeconds: 10
             failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
           resources:
             requests: {cpu: 50m, memory: 96Mi}
             limits: {memory: 256Mi}

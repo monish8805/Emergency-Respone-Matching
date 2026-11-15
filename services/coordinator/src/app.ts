@@ -1,12 +1,25 @@
 import express from "express";
-import { shardFor, type NodeConfig } from "@emergency/shared";
+import { httpErrorMessage, shardFor, type NodeConfig } from "@emergency/shared";
 import type { NodeRegistry } from "./nodes";
 
 type Entry = { value: unknown; version: number };
 
-export function createCoordinatorApp(registry: NodeRegistry) {
+export interface CoordinatorOptions {
+  // With several coordinators only one (the leader) may handle data. Defaults to always true.
+  isLeader?: () => boolean;
+}
+
+export function createCoordinatorApp(registry: NodeRegistry, { isLeader = () => true }: CoordinatorOptions = {}) {
   const app = express();
   app.use(express.json({ limit: "1mb" }));
+
+  // A coordinator that is not the leader answers nothing under /internal: its in-memory locks and
+  // node health would be a second, conflicting view. Kubernetes also keeps it out of the Service
+  // (the /ready probe fails), so callers normally never reach it.
+  app.use("/internal", (_req, res, next) => {
+    if (isLeader()) return next();
+    res.status(503).json({ error: "not the leader" });
+  });
 
   // Calls one storage node. Network errors mark the node down.
   async function call(
@@ -54,24 +67,32 @@ export function createCoordinatorApp(registry: NodeRegistry) {
 
   // ---- single-key operations ----
 
+  // Quorum read: ask every node that is up, require a majority of the shard to have answered, and
+  // take the newest version. A majority always overlaps the majority that acknowledged the latest
+  // write, so the newest acknowledged value is never missed, even with a minority of nodes down.
   async function readEntry(shard: number, key: string): Promise<Entry | "missing" | "unavailable"> {
     const targets = registry.liveNodes(shard);
-    if (targets.length === 0) return "unavailable";
-    let missing = false;
-    for (const node of targets) {
-      const r = await call(node, "GET", `/internal/data/${encodeURIComponent(key)}`);
-      if (!r) continue;
-      if (r.status === 404) {
-        missing = true;
-        continue;
-      }
-      if (r.ok) return { value: await r.json(), version: Number(r.headers.get("x-version") ?? 0) };
-      registry.markDown(node.id);
-    }
-    return missing ? "missing" : "unavailable";
+    if (targets.length < registry.quorum(shard)) return "unavailable";
+    const answers = await Promise.all(
+      targets.map(async (node): Promise<Entry | null | undefined> => {
+        const r = await call(node, "GET", `/internal/data/${encodeURIComponent(key)}`);
+        if (!r) return undefined;
+        if (r.status === 404) return null;
+        if (r.ok) return { value: await r.json(), version: Number(r.headers.get("x-version") ?? 0) };
+        registry.markDown(node.id);
+        return undefined;
+      }),
+    );
+    const answered = answers.filter((a): a is Entry | null => a !== undefined);
+    if (answered.length < registry.quorum(shard)) return "unavailable";
+    let newest: Entry | undefined;
+    for (const a of answered) if (a && (!newest || a.version > newest.version)) newest = a;
+    return newest ?? "missing";
   }
 
-  // Writes to every node of the shard that is alive (primary, replica, and nodes catching up).
+  // Writes to every node of the shard that is alive (including nodes catching up). The write only
+  // counts as done when a majority of the shard accepted it; otherwise the caller gets a 503 (a
+  // minority may still hold the value, which is why creates carry an idempotency key).
   // A node answers { applied: false, version } when it already holds a NEWER version, which means
   // our version is too low (clock behind after a restart). Then we move past it and write again,
   // instead of reporting success for a write that was thrown away.
@@ -82,6 +103,9 @@ export function createCoordinatorApp(registry: NodeRegistry) {
     atLeast = 0,
   ): Promise<{ ok: boolean; replicas: number; version: number }> {
     const targets = registry.writeNodes(shard);
+    // Not enough nodes to ever reach a majority: refuse before sending anything, so a write that is
+    // going to be answered 503 is not left behind on the one node that was reachable.
+    if (targets.length < registry.quorum(shard)) return { ok: false, replicas: 0, version: lastVersion };
     let minimum = atLeast;
     for (let attempt = 0; attempt < 3; attempt++) {
       const version = nextVersion(minimum);
@@ -101,7 +125,7 @@ export function createCoordinatorApp(registry: NodeRegistry) {
         if (reply.applied === false) newest = Math.max(newest, Number(reply.version) || 0);
         else accepted++;
       }
-      if (newest === 0) return { ok: accepted > 0, replicas: accepted, version };
+      if (newest === 0) return { ok: accepted >= registry.quorum(shard), replicas: accepted, version };
       console.warn(`write to ${key} was older than stored version ${newest}, retrying above it`);
       minimum = newest + 1;
     }
@@ -139,30 +163,39 @@ export function createCoordinatorApp(registry: NodeRegistry) {
     syncing.add(node.id);
     const bootId = registry.bootIdOf(node.id);
     try {
-      const peer = registry.peersOf(node.id)[0];
-      const peerDump = peer ? await dumpOf(peer) : null;
-      if (peer && peerDump) {
+      // Reconcile with every reachable node of the shard, not just one: the newest copy of each
+      // key wins and is pushed to all the others.
+      const peers: NodeConfig[] = [];
+      const keys = new Set<string>();
+      for (const peer of registry.peersOf(node.id)) {
+        const dump = await dumpOf(peer);
+        if (!dump) continue;
+        peers.push(peer);
+        for (const e of dump) keys.add(e[0]);
+      }
+      if (peers.length > 0) {
         const nodeDump = await dumpOf(node);
         if (!nodeDump) return; // node is unreachable; it stays out until its next heartbeat
-        const keys = new Set([...peerDump.map((e) => e[0]), ...nodeDump.map((e) => e[0])]);
+        for (const e of nodeDump) keys.add(e[0]);
+        const group = [node, ...peers];
         let copied = 0;
         for (const key of keys) {
           const ok = await withLock(key, async () => {
-            const [theirs, mine] = [await entryOf(peer, key), await entryOf(node, key)];
-            if (theirs === undefined || mine === undefined) return false;
-            if (theirs && (!mine || theirs.version > mine.version)) {
+            const entries = await Promise.all(group.map((n) => entryOf(n, key)));
+            if (entries.some((e) => e === undefined)) return false;
+            let best: Entry | undefined;
+            for (const e of entries) if (e && (!best || e.version > best.version)) best = e;
+            if (!best) return true;
+            for (const [i, e] of entries.entries()) {
+              if (e && e.version >= best.version) continue;
               copied++;
-              return copyEntry(node, key, theirs);
-            }
-            if (mine && (!theirs || mine.version > theirs.version)) {
-              copied++;
-              return copyEntry(peer, key, mine);
+              if (!(await copyEntry(group[i], key, best))) return false;
             }
             return true;
           });
           if (!ok) return; // stay "syncing"; the next heartbeat retries
         }
-        console.log(`reconciled ${node.id} with ${peer.id}: ${copied} of ${keys.size} keys differed`);
+        console.log(`reconciled ${node.id} with ${peers.map((p) => p.id).join(", ")}: ${copied} copies of ${keys.size} keys`);
       } else {
         console.log(`${node.id} has no reachable peer, serving its own data`);
       }
@@ -252,24 +285,27 @@ export function createCoordinatorApp(registry: NodeRegistry) {
     else res.status(503).json({ error: `shard ${shard} unavailable` });
   });
 
-  // Lists all keys with a prefix, across every shard.
+  // Lists all keys with a prefix, across every shard. Each shard answers from a majority of its
+  // nodes and the newest version of every key wins.
   app.get("/internal/list", async (req, res) => {
     const prefix = typeof req.query.prefix === "string" ? req.query.prefix : "";
     const found: Array<{ key: string; value: unknown; version: number }> = [];
     for (let shard = 0; shard < registry.shardCount(); shard++) {
-      let answered = false;
-      for (const node of registry.liveNodes(shard)) {
-        // The node applies the prefix itself, so only matching records cross the network.
-        const dump = await dumpOf(node, prefix);
-        if (!dump) continue;
-        for (const [key, value, version] of dump) found.push({ key, value, version });
-        answered = true;
-        break;
-      }
-      if (!answered) {
+      const nodes = registry.liveNodes(shard);
+      // The node applies the prefix itself, so only matching records cross the network.
+      const dumps = (await Promise.all(nodes.map((n) => dumpOf(n, prefix)))).filter((d) => d !== null);
+      if (dumps.length < registry.quorum(shard)) {
         res.status(503).json({ error: `shard ${shard} unavailable` });
         return;
       }
+      const newest = new Map<string, { key: string; value: unknown; version: number }>();
+      for (const dump of dumps) {
+        for (const [key, value, version] of dump) {
+          const have = newest.get(key);
+          if (!have || version > have.version) newest.set(key, { key, value, version });
+        }
+      }
+      found.push(...newest.values());
     }
     res.json(found);
   });
@@ -280,8 +316,15 @@ export function createCoordinatorApp(registry: NodeRegistry) {
       shard,
       live: registry.liveNodes(shard).length,
       total: nodes.filter((n) => n.shard === shard).length,
+      quorum: registry.quorum(shard),
     }));
-    res.json({ ok: shards.every((s) => s.live > 0), nodes, shards });
+    res.json({ ok: shards.every((s) => s.live >= s.quorum), leader: isLeader(), nodes, shards });
+  });
+
+  // Readiness: only the leader is ready, so the Kubernetes Service sends traffic (and the storage
+  // nodes' heartbeats) to exactly one coordinator. Liveness stays /health.
+  app.get("/ready", (_req, res) => {
+    res.status(isLeader() ? 200 : 503).json({ leader: isLeader() });
   });
 
   app.get("/", (_req, res) => res.json({ service: "coordinator", health: "/health" }));
@@ -289,7 +332,7 @@ export function createCoordinatorApp(registry: NodeRegistry) {
   app.use((err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
     const status = typeof (err as { status?: unknown }).status === "number" ? (err as { status: number }).status : 500;
     if (status === 500) console.error(err);
-    res.status(status).json({ error: status === 500 ? "internal error" : "bad request" });
+    res.status(status).json({ error: httpErrorMessage(status, "1mb") });
   });
 
   return app;

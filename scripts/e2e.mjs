@@ -25,7 +25,8 @@ const platform =
   MODE === "compose"
     ? {
         name: "docker compose",
-        storage: (shard, role) => `storage-s${shard}-${role}`,
+        // Three nodes per shard (index 0..2); any two are a quorum.
+        storage: (shard, i) => `storage-s${shard}-${"abc"[i]}`,
         exec: (svc, cmd) => c(`exec -T ${svc} ${cmd}`),
         kill: (svc) => c(`kill ${svc}`),
         // `docker kill` counts as a manual stop, so the restart policy does NOT bring the container
@@ -44,7 +45,7 @@ const platform =
       }
     : {
         name: "kubernetes",
-        storage: (shard, role) => `storage-s${shard}-${role === "primary" ? 0 : 1}`,
+        storage: (shard, i) => `storage-s${shard}-${i}`,
         exec: (pod, cmd) => k(`exec ${pod} -- ${cmd}`),
         kill: (pod) => k(`delete pod ${pod} --grace-period=0 --force`),
         recover: () => "", // the StatefulSet recreates it by itself
@@ -145,6 +146,19 @@ function assert(cond, msg) {
   if (!cond) throw new Error(`assertion failed: ${msg}`);
 }
 
+// The list endpoints are paginated: follow the cursors to get every row.
+async function listAll(path) {
+  const items = [];
+  let cursor;
+  do {
+    const res = await api(`${path}?limit=200${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`);
+    if (res.status !== 200) throw new Error(`GET ${path} failed with ${res.status}`);
+    items.push(...res.body.items);
+    cursor = res.body.nextCursor;
+  } while (cursor);
+  return items;
+}
+
 const newResource = (type, location) => api("/resources", { method: "POST", body: { type, location } });
 const newRequest = (type, location, details = "e2e") => api("/requests", { method: "POST", body: { type, location, details } });
 const getRequest = async (id) => (await api(`/requests/${id}`)).body;
@@ -164,9 +178,9 @@ const sameEntries = (a, b) => a.size === b.size && [...a].every(([key, v]) => b.
 const system = async () => (await api("/system")).body;
 
 async function waitAllNodesUp(timeout = 60000) {
-  await waitFor("all 6 storage nodes up", async () => {
+  await waitFor("all 9 storage nodes up", async () => {
     const s = await system();
-    return s.coordinator?.nodes?.length === 6 && s.coordinator.nodes.every((n) => n.status === "up");
+    return s.coordinator?.nodes?.length === 9 && s.coordinator.nodes.every((n) => n.status === "up");
   }, timeout, 1000);
 }
 
@@ -194,9 +208,9 @@ test("1. normal request: create → queue → match → statuses updated", async
   assert(req.status === 201 && req.body.status === "PENDING", "request created as PENDING");
   const done = await waitAssigned(req.body.id);
   assert(done.resourceId === res.body.id, "request assigned the resource we registered");
-  const r = (await api("/resources")).body.find((x) => x.id === res.body.id);
+  const r = (await listAll("/resources")).find((x) => x.id === res.body.id);
   assert(r.status === "ASSIGNED" && r.availability === false && r.assignedRequestId === req.body.id, "resource marked ASSIGNED to this request");
-  const list = (await api("/requests")).body;
+  const list = await listAll("/requests");
   assert(list.some((x) => x.id === req.body.id), "request appears in GET /requests");
 });
 
@@ -225,7 +239,7 @@ test("3. concurrent claim: 10 requests race for ONE resource, exactly one wins",
   assert(winners.length === 1, `exactly one request assigned (got ${winners.length})`);
   assert(winners[0].resourceId === res.body.id, "winner holds the resource");
   assert(all.filter((r) => r.status === "PENDING").length === 9, "other 9 stay PENDING");
-  const resource = (await api("/resources")).body.find((x) => x.id === res.body.id);
+  const resource = (await listAll("/resources")).find((x) => x.id === res.body.id);
   assert(resource.assignedRequestId === winners[0].id, "resource points back at the winner");
 });
 
@@ -311,7 +325,7 @@ test("4. matching: late resource is matched automatically, 409 on re-match, canc
 
   const cancelled = await api(`/requests/${req.body.id}/status`, { method: "PUT", body: { status: "CANCELLED" } });
   assert(cancelled.status === 200, "request cancelled");
-  const freed = (await api("/resources")).body.find((x) => x.id === res.body.id);
+  const freed = (await listAll("/resources")).find((x) => x.id === res.body.id);
   assert(freed.status === "AVAILABLE" && freed.availability === true, "cancelling released the resource");
 });
 
@@ -384,24 +398,23 @@ test("6b. rabbitmq restart: jobs already queued survive a restart of the broker 
   assert(new Set(done.map((d) => d.resourceId)).size === n, "every queued job was matched after the restart");
 });
 
-test("7. sharding: data spread across all 3 shards, replicas identical", async () => {
+test("7. sharding: data spread across all 3 shards, all 3 copies identical", async () => {
   const counts = [];
   for (let s = 0; s < 3; s++) {
-    const primary = nodeEntries(platform.storage(s, "primary"));
-    const replica = nodeEntries(platform.storage(s, "replica"));
-    assert(primary.size > 0, `shard ${s} holds data (${primary.size} keys)`);
-    assert(sameEntries(primary, replica), `shard ${s} replica matches primary (same keys and versions)`);
-    counts.push(primary.size);
+    const [first, ...others] = [0, 1, 2].map((i) => nodeEntries(platform.storage(s, i)));
+    assert(first.size > 0, `shard ${s} holds data (${first.size} keys)`);
+    assert(others.every((o) => sameEntries(first, o)), `shard ${s}: all three nodes hold the same keys and versions`);
+    counts.push(first.size);
   }
   console.log(`      keys per shard: ${counts.join(" / ")}`);
 });
 
-test("8. shard failure: kill a storage node, the replica keeps serving reads and writes", async () => {
-  const victim = platform.storage(0, "primary");
-  const before = (await api("/requests")).body.length;
+test("8. shard failure: kill a storage node, the other two (a quorum) keep serving reads and writes", async () => {
+  const victim = platform.storage(0, 0);
+  const before = (await listAll("/requests")).length;
   platform.kill(victim);
-  const list = await api("/requests");
-  assert(list.status === 200 && list.body.length === before, `all ${before} requests still readable`);
+  const list = await listAll("/requests");
+  assert(list.length === before, `all ${before} requests still readable`);
   const created = [];
   for (let i = 0; i < 10; i++) {
     const r = await newRequest("water", `outage-${run}-${i}`);
@@ -411,23 +424,70 @@ test("8. shard failure: kill a storage node, the replica keeps serving reads and
   for (const id of created) assert((await getRequest(id)).id === id, "request written during outage is readable");
   const s = await waitFor("failure detected", async () => {
     const sys = await system();
-    return sys.coordinator.nodes.find((n) => n.id.includes("s0-primary") || n.id === "storage-s0-0")?.status === "down" ? sys : null;
+    return sys.coordinator.nodes.find((n) => n.id === "s0-a" || n.id === "storage-s0-0")?.status === "down" ? sys : null;
   }, 20000, 500).catch(() => null);
   console.log(`      failure detected by coordinator: ${s ? "yes" : "not observed (node already replaced)"}`);
 });
 
 test("9. replica recovery: restarted node catches up with writes it missed", async () => {
-  const victim = platform.storage(0, "primary");
+  const victim = platform.storage(0, 0);
   platform.recover(victim);
   platform.waitReady(victim);
   await waitAllNodesUp();
-  const peer = nodeEntries(platform.storage(0, "replica"));
+  const peer = nodeEntries(platform.storage(0, 1));
   await waitFor("node resynced", () => sameEntries(nodeEntries(victim), peer), 40000, 1000);
-  console.log(`      ${victim} holds all ${peer.size} keys, same versions as its replica`);
+  console.log(`      ${victim} holds all ${peer.size} keys, same versions as its peer`);
+});
+
+test("9b. quorum: with two of three nodes of a shard down, writes are refused instead of stored", async () => {
+  // Compose only: Kubernetes recreates a killed pod within seconds, so the outage is too short to observe.
+  if (MODE !== "compose") return "skipped";
+  const [a, b] = [platform.storage(1, 0), platform.storage(1, 1)];
+  platform.kill(a);
+  platform.kill(b);
+  await sleep(1000);
+  // Requests hash to different shards; some will hit shard 1 and must be refused, never half-stored.
+  const attempts = [];
+  for (let i = 0; i < 12; i++) attempts.push(await newRequest("food", `no-quorum-${run}-${i}`));
+  const refused = attempts.filter((r) => r.status === 503);
+  assert(refused.length > 0, "writes that route to the broken shard answer 503");
+  assert(attempts.every((r) => r.status === 201 || r.status === 503), "every other answer is a clean 201");
+  platform.recover(a);
+  platform.recover(b);
+  platform.waitReady(a);
+  platform.waitReady(b);
+  await waitAllNodesUp();
+  // Retrying a refused create with a key stores it exactly once, whether or not the first try landed.
+  const key = `e2e-retry-${run}`;
+  const send = () =>
+    fetch(`${API}/requests`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": key },
+      body: JSON.stringify({ type: "food", location: `retry-${run}`, details: "e2e" }),
+    });
+  const [x, y] = await Promise.all([send(), send()]);
+  assert([x.status, y.status].every((c) => c === 200 || c === 201), "both attempts succeed");
+  const rows = (await listAll("/requests")).filter((r) => r.location === `retry-${run}`);
+  assert(rows.length === 1, `one record after two attempts with the same key (${rows.length})`);
+});
+
+test("9c. input handling: bad locations, oversized bodies, pagination", async () => {
+  for (const location of ["91, 10", "123", "!!!"]) {
+    const r = await newRequest("water", location);
+    assert(r.status === 400, `location ${JSON.stringify(location)} is rejected (got ${r.status})`);
+  }
+  const big = await api("/requests", { method: "POST", body: { type: "water", location: "A", details: "x".repeat(200000) } });
+  assert(big.status === 413 && /too large/.test(big.body.error), `oversized body gets 413 with a clear message (${big.body.error})`);
+  const page = await api("/requests?limit=2");
+  assert(page.status === 200 && page.body.items.length <= 2 && page.body.total >= page.body.items.length, "limit is honoured");
+  if (page.body.nextCursor) {
+    const next = await api(`/requests?limit=2&cursor=${encodeURIComponent(page.body.nextCursor)}`);
+    assert(next.status === 200 && !next.body.items.some((r) => page.body.items.some((p) => p.id === r.id)), "next page has no repeats");
+  }
 });
 
 test("10. service failure: killed request-service comes back, no data lost", async () => {
-  const before = (await api("/requests")).body.length;
+  const before = (await listAll("/requests")).length;
   platform.killApi();
   if (MODE === "k8s") {
     let ok = 0;
@@ -440,8 +500,8 @@ test("10. service failure: killed request-service comes back, no data lost", asy
   }
   platform.recoverApi();
   const after = await waitFor("requests readable again", async () => {
-    const r = await api("/requests");
-    return r.status === 200 ? r.body.length : null;
+    const r = await api("/requests?limit=1");
+    return r.status === 200 ? r.body.total : null;
   }, 90000, 1000);
   assert(after >= before, `no data lost (${after} ≥ ${before})`);
   const loc = `after-api-${run}`;
@@ -491,7 +551,7 @@ async function main() {
     try {
       const outcome = await t.fn();
       results.push({ name: t.name, ok: true, skipped: outcome === "skipped" });
-      console.log(outcome === "skipped" ? "  - skipped (kubernetes only)\n" : `  ✓ passed (${((Date.now() - start) / 1000).toFixed(1)}s)\n`);
+      console.log(outcome === "skipped" ? "  - skipped \n" : `  ✓ passed (${((Date.now() - start) / 1000).toFixed(1)}s)\n`);
     } catch (e) {
       results.push({ name: t.name, ok: false, err: e.message });
       console.log(`  ✗ FAILED: ${e.message}\n`);

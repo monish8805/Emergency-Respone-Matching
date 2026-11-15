@@ -8,7 +8,7 @@ import { createCoordinatorApp } from "../src/app";
 import { NodeRegistry } from "../src/nodes";
 
 // These tests run the real coordinator against six real storage servers over HTTP
-// (3 shards, each with a primary and a replica). Nothing is mocked.
+// (3 shards of 3 nodes each, majority quorum of 2). Nothing is mocked.
 
 interface Storage {
   config: NodeConfig;
@@ -59,8 +59,9 @@ async function waitUntil(what: string, fn: () => Promise<boolean> | boolean, ms 
 }
 
 const statusOf = (id: string) => registry.statusOf(id);
-const primaryOf = (shard: number) => storages.find((s) => s.config.shard === shard && s.config.id.endsWith("-primary"))!;
-const replicaOf = (shard: number) => storages.find((s) => s.config.shard === shard && s.config.id.endsWith("-replica"))!;
+const nodeOf = (shard: number, n: "a" | "b" | "c") => storages.find((s) => s.config.id === `s${shard}-${n}`)!;
+const primaryOf = (shard: number) => nodeOf(shard, "a");
+const replicaOf = (shard: number) => nodeOf(shard, "b");
 
 function putKey(key: string, value: unknown) {
   return request(coordinator).put(`/internal/data/${encodeURIComponent(key)}`).send(value as object);
@@ -70,8 +71,7 @@ const getKey = (key: string) => request(coordinator).get(`/internal/data/${encod
 beforeEach(async () => {
   storages = [];
   for (let shard = 0; shard < 3; shard++) {
-    storages.push(await startStorage(`s${shard}-primary`, shard));
-    storages.push(await startStorage(`s${shard}-replica`, shard));
+    for (const n of ["a", "b", "c"]) storages.push(await startStorage(`s${shard}-${n}`, shard));
   }
   registry = new NodeRegistry(
     storages.map((s) => s.config),
@@ -102,14 +102,15 @@ describe("sharding and replication", () => {
     expect(usedShards.size).toBe(3);
   });
 
-  it("writes each key to both the primary and the replica with the same version", async () => {
+  it("writes each key to all three nodes of its shard with the same version", async () => {
     const key = "resource:replicated";
     const shard = shardFor(key, 3);
     const res = await putKey(key, { v: 1 }).expect(200);
-    expect(res.body.replicasWritten).toBe(2);
-    const [p, r] = [primaryOf(shard).data.get(key)!, replicaOf(shard).data.get(key)!];
+    expect(res.body.replicasWritten).toBe(3);
+    const [p, r, c] = [primaryOf(shard).data.get(key)!, replicaOf(shard).data.get(key)!, nodeOf(shard, "c").data.get(key)!];
     expect(p.value).toEqual({ v: 1 });
     expect(r).toEqual(p);
+    expect(c).toEqual(p);
   });
 
   it("reads data back through the coordinator with its version", async () => {
@@ -174,8 +175,8 @@ describe("compare-and-set", () => {
   });
 });
 
-describe("failure detection and replica fallback", () => {
-  it("keeps serving reads and writes from the replica when the primary dies", async () => {
+describe("failure detection and quorum", () => {
+  it("keeps serving reads and writes when one node dies (2 of 3 is a quorum)", async () => {
     const key = "request:failover";
     const shard = shardFor(key, 3);
     await putKey(key, { v: "before" });
@@ -184,7 +185,7 @@ describe("failure detection and replica fallback", () => {
 
     expect((await getKey(key).expect(200)).body).toEqual({ v: "before" });
     const write = await putKey(key, { v: "during" }).expect(200);
-    expect(write.body.replicasWritten).toBe(1);
+    expect(write.body.replicasWritten).toBe(2);
     expect((await getKey(key)).body).toEqual({ v: "during" });
     expect(statusOf(primaryOf(shard).config.id)).toBe("down");
   });
@@ -199,7 +200,7 @@ describe("failure detection and replica fallback", () => {
     expect((await getKey(key)).body).toEqual({ v: 2 });
   });
 
-  it("reports 503 when both nodes of a shard are gone", async () => {
+  it("refuses reads and writes when a majority of the shard is gone, instead of answering from one node", async () => {
     const key = "request:total-loss";
     const shard = shardFor(key, 3);
     await putKey(key, { v: 1 });
@@ -207,6 +208,19 @@ describe("failure detection and replica fallback", () => {
     await stop(replicaOf(shard).server);
     await getKey(key).expect(503);
     await putKey(key, { v: 2 }).expect(503);
+    // The refused write was not left behind on the one survivor, and the acknowledged value is intact.
+    expect(nodeOf(shard, "c").data.get(key)!.value).toEqual({ v: 1 });
+  });
+
+  it("a read returns the newest copy even when one live node is stale", async () => {
+    const key = "request:stale-node";
+    const shard = shardFor(key, 3);
+    await putKey(key, { v: "new" });
+    nodeOf(shard, "a").data.set(key, { value: { v: "stale" }, version: 1 });
+    expect((await getKey(key).expect(200)).body).toEqual({ v: "new" });
+    const listed = await request(coordinator).get("/internal/list").query({ prefix: "request:stale" }).expect(200);
+    expect(listed.body).toHaveLength(1);
+    expect(listed.body[0].value).toEqual({ v: "new" });
   });
 
   it("detects a missing heartbeat as a failure", () => {
@@ -223,19 +237,38 @@ describe("failure detection and replica fallback", () => {
   it("exposes node and shard health", async () => {
     await stop(primaryOf(1).server);
     await getKey(`request:poke-${Math.random()}`); // any call touching the dead node marks it down
-    for (let i = 0; i < 20 && statusOf("s1-primary") !== "down"; i++) {
+    for (let i = 0; i < 20 && statusOf("s1-a") !== "down"; i++) {
       await request(coordinator).get("/internal/list").query({ prefix: "x" });
     }
     const res = await request(coordinator).get("/health").expect(200);
-    expect(res.body.nodes).toHaveLength(6);
-    expect(res.body.nodes.find((n: { id: string }) => n.id === "s1-primary").down).toBe(true);
-    expect(res.body.shards[1]).toEqual({ shard: 1, live: 1, total: 2 });
+    expect(res.body.nodes).toHaveLength(9);
+    expect(res.body.nodes.find((n: { id: string }) => n.id === "s1-a").down).toBe(true);
+    expect(res.body.shards[1]).toEqual({ shard: 1, live: 2, total: 3, quorum: 2 });
     expect(res.body.ok).toBe(true);
   });
 });
 
+describe("leader election guard", () => {
+  it("a coordinator that is not the leader serves no data and reports not ready", async () => {
+    const standby = createCoordinatorApp(registry, { isLeader: () => false });
+    await request(standby).get("/internal/data/request%3Aanything").expect(503);
+    await request(standby).put("/internal/data/request%3Aanything").send({ a: 1 }).expect(503);
+    await request(standby).post("/internal/nodes/heartbeat").send({ id: "s0-a" }).expect(503);
+    await request(standby).get("/ready").expect(503);
+    await request(standby).get("/health").expect(200); // alive, so Kubernetes does not restart it
+    await request(coordinator).get("/ready").expect(200);
+  });
+
+  it("a new leader forgets node health and re-reconciles every node before trusting it", async () => {
+    registry.reset();
+    expect(storages.every((s) => statusOf(s.config.id) === "syncing")).toBe(true);
+    for (const s of storages) await heartbeat(s);
+    await waitUntil("all nodes up again", () => storages.every((s) => statusOf(s.config.id) === "up"));
+  });
+});
+
 describe("recovery and synchronization", () => {
-  it("resyncs a restarted, empty node from its replica, including writes made during the outage", async () => {
+  it("resyncs a restarted, empty node from its peers, including writes made during the outage", async () => {
     const shard = 0;
     const keys = Array.from({ length: 40 }, (_, i) => `request:r-${i}`).filter((k) => shardFor(k, 3) === shard);
     expect(keys.length).toBeGreaterThan(3);

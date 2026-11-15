@@ -47,7 +47,31 @@ export class NodeRegistry {
     return [...this.nodes.values()].filter((s) => s.config.shard === shard && accept(s)).map((s) => s.config);
   }
 
-  // Nodes that may serve reads, in config order (the first one is the shard's primary).
+  // How many nodes the shard is configured with, whatever their state.
+  totalNodes(shard: number): number {
+    return this.inShard(shard, () => true).length;
+  }
+
+  // A majority of the shard's configured nodes. A write is only acknowledged once this many hold
+  // it, and a read only answers once this many were asked, so every read overlaps every
+  // acknowledged write and sees it, even with a minority of the shard down.
+  quorum(shard: number): number {
+    return Math.floor(this.totalNodes(shard) / 2) + 1;
+  }
+
+  // Forgets everything known about node health: used when this coordinator becomes the leader,
+  // since heartbeats were going to the previous leader. Every node must re-register and be
+  // reconciled before it is trusted again.
+  reset(): void {
+    const t = this.now();
+    for (const s of this.nodes.values()) {
+      s.status = "syncing";
+      s.lastSeen = t;
+      s.bootId = undefined;
+    }
+  }
+
+  // Nodes that may serve reads.
   liveNodes(shard: number): NodeConfig[] {
     return this.inShard(shard, (s) => s.status === "up");
   }
