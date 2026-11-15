@@ -66,6 +66,9 @@ services:
       DATA_DIR: /data
     volumes:
       - data-s0-a:/data
+    ports:
+      # Localhost only, for debugging: host port 4001 is node s0-a's port 4000.
+      - "127.0.0.1:4001:4000"
 
   storage-s0-b:
     <<: *storage
@@ -77,6 +80,9 @@ services:
       DATA_DIR: /data
     volumes:
       - data-s0-b:/data
+    ports:
+      # Localhost only, for debugging: host port 4002 is node s0-b's port 4000.
+      - "127.0.0.1:4002:4000"
 
   storage-s0-c:
     <<: *storage
@@ -88,6 +94,9 @@ services:
       DATA_DIR: /data
     volumes:
       - data-s0-c:/data
+    ports:
+      # Localhost only, for debugging: host port 4003 is node s0-c's port 4000.
+      - "127.0.0.1:4003:4000"
 
   storage-s1-a:
     <<: *storage
@@ -99,6 +108,9 @@ services:
       DATA_DIR: /data
     volumes:
       - data-s1-a:/data
+    ports:
+      # Localhost only, for debugging: host port 4004 is node s1-a's port 4000.
+      - "127.0.0.1:4004:4000"
 
   storage-s1-b:
     <<: *storage
@@ -110,6 +122,9 @@ services:
       DATA_DIR: /data
     volumes:
       - data-s1-b:/data
+    ports:
+      # Localhost only, for debugging: host port 4005 is node s1-b's port 4000.
+      - "127.0.0.1:4005:4000"
 
   storage-s1-c:
     <<: *storage
@@ -121,6 +136,9 @@ services:
       DATA_DIR: /data
     volumes:
       - data-s1-c:/data
+    ports:
+      # Localhost only, for debugging: host port 4006 is node s1-c's port 4000.
+      - "127.0.0.1:4006:4000"
 
   storage-s2-a:
     <<: *storage
@@ -132,6 +150,9 @@ services:
       DATA_DIR: /data
     volumes:
       - data-s2-a:/data
+    ports:
+      # Localhost only, for debugging: host port 4007 is node s2-a's port 4000.
+      - "127.0.0.1:4007:4000"
 
   storage-s2-b:
     <<: *storage
@@ -143,6 +164,9 @@ services:
       DATA_DIR: /data
     volumes:
       - data-s2-b:/data
+    ports:
+      # Localhost only, for debugging: host port 4008 is node s2-b's port 4000.
+      - "127.0.0.1:4008:4000"
 
   storage-s2-c:
     <<: *storage
@@ -154,6 +178,9 @@ services:
       DATA_DIR: /data
     volumes:
       - data-s2-c:/data
+    ports:
+      # Localhost only, for debugging: host port 4009 is node s2-c's port 4000.
+      - "127.0.0.1:4009:4000"
 
   request-service:
     <<: [*service, *hardened]
@@ -188,6 +215,9 @@ services:
       RABBITMQ_URL: "amqp://rabbitmq:5672"
       # Coordinates match within this distance; zone names match exactly.
       MATCH_RADIUS_KM: "${MATCH_RADIUS_KM:-5}"
+    ports:
+      # Localhost only, for debugging (health check).
+      - "127.0.0.1:3007:3007"
     depends_on:
       coordinator:
         condition: service_healthy

@@ -72,6 +72,8 @@ curl localhost:3005/requests           # list
 curl localhost:3005/system             # health of request service, RabbitMQ, coordinator and every storage node
 ```
 
+For debugging, Compose also publishes the Matching Service on `127.0.0.1:3007` and the storage nodes on `127.0.0.1:4001-4009` (s0-a, s0-b, s0-c, s1-a, … s2-c). They are bound to localhost because the storage nodes have no authentication.
+
 API: `POST/GET /requests`, `GET /requests/:id`, `PUT /requests/:id/status`, `POST/GET /resources`, `PUT /resources/:id/status`, `POST /match/:requestId`, `GET /health`, `GET /system`.
 
 ### Simulate shard failure and recovery
