@@ -11,6 +11,12 @@ spec:
     metadata:
       labels: {app: request-service}
     spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000          # so the volume of a storage node is writable by the non-root user
+        seccompProfile: {type: RuntimeDefault}
       containers:
         - name: request-service
           image: emergency/request-service:latest
@@ -32,6 +38,9 @@ spec:
             initialDelaySeconds: 15
             periodSeconds: 10
             failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
           resources:
             requests: {cpu: 50m, memory: 96Mi}
             limits: {memory: 256Mi}

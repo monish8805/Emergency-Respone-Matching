@@ -2,8 +2,14 @@
 x-service: &service
   restart: unless-stopped
 
+# Hardening shared by every container built from this repo (RabbitMQ keeps its own image defaults):
+# the images already run as the unprivileged "node" user; these drop what a Node process never needs.
+x-hardened: &hardened
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+
 x-storage: &storage
-  <<: *service
+  <<: [*service, *hardened]
   build:
     context: .
     dockerfile: services/storage-node/Dockerfile
@@ -33,14 +39,14 @@ services:
       retries: 20
 
   coordinator:
-    <<: *service
+    <<: [*service, *hardened]
     build:
       context: .
       dockerfile: services/coordinator/Dockerfile
     environment:
       PORT: "3006"
       HEARTBEAT_TIMEOUT_MS: "6000"
-      STORAGE_NODES: '[{"id":"s0-primary","shard":0,"url":"http://storage-s0-primary:4000"},{"id":"s0-replica","shard":0,"url":"http://storage-s0-replica:4000"},{"id":"s1-primary","shard":1,"url":"http://storage-s1-primary:4000"},{"id":"s1-replica","shard":1,"url":"http://storage-s1-replica:4000"},{"id":"s2-primary","shard":2,"url":"http://storage-s2-primary:4000"},{"id":"s2-replica","shard":2,"url":"http://storage-s2-replica:4000"}]'
+      STORAGE_NODES: '[{"id":"s0-a","shard":0,"url":"http://storage-s0-a:4000"},{"id":"s0-b","shard":0,"url":"http://storage-s0-b:4000"},{"id":"s0-c","shard":0,"url":"http://storage-s0-c:4000"},{"id":"s1-a","shard":1,"url":"http://storage-s1-a:4000"},{"id":"s1-b","shard":1,"url":"http://storage-s1-b:4000"},{"id":"s1-c","shard":1,"url":"http://storage-s1-c:4000"},{"id":"s2-a","shard":2,"url":"http://storage-s2-a:4000"},{"id":"s2-b","shard":2,"url":"http://storage-s2-b:4000"},{"id":"s2-c","shard":2,"url":"http://storage-s2-c:4000"}]'
     ports:
       # Localhost only: /internal/* is for the services, never for the public network.
       - "127.0.0.1:3006:3006"
@@ -50,74 +56,107 @@ services:
       timeout: 2s
       retries: 10
 
-  storage-s0-primary:
+  storage-s0-a:
     <<: *storage
     environment:
-      NODE_ID: s0-primary
+      NODE_ID: s0-a
       SHARD: "0"
       PORT: "4000"
       COORDINATOR_URL: "http://coordinator:3006"
       DATA_DIR: /data
     volumes:
-      - data-s0-primary:/data
+      - data-s0-a:/data
 
-  storage-s0-replica:
+  storage-s0-b:
     <<: *storage
     environment:
-      NODE_ID: s0-replica
+      NODE_ID: s0-b
       SHARD: "0"
       PORT: "4000"
       COORDINATOR_URL: "http://coordinator:3006"
       DATA_DIR: /data
     volumes:
-      - data-s0-replica:/data
+      - data-s0-b:/data
 
-  storage-s1-primary:
+  storage-s0-c:
     <<: *storage
     environment:
-      NODE_ID: s1-primary
+      NODE_ID: s0-c
+      SHARD: "0"
+      PORT: "4000"
+      COORDINATOR_URL: "http://coordinator:3006"
+      DATA_DIR: /data
+    volumes:
+      - data-s0-c:/data
+
+  storage-s1-a:
+    <<: *storage
+    environment:
+      NODE_ID: s1-a
       SHARD: "1"
       PORT: "4000"
       COORDINATOR_URL: "http://coordinator:3006"
       DATA_DIR: /data
     volumes:
-      - data-s1-primary:/data
+      - data-s1-a:/data
 
-  storage-s1-replica:
+  storage-s1-b:
     <<: *storage
     environment:
-      NODE_ID: s1-replica
+      NODE_ID: s1-b
       SHARD: "1"
       PORT: "4000"
       COORDINATOR_URL: "http://coordinator:3006"
       DATA_DIR: /data
     volumes:
-      - data-s1-replica:/data
+      - data-s1-b:/data
 
-  storage-s2-primary:
+  storage-s1-c:
     <<: *storage
     environment:
-      NODE_ID: s2-primary
+      NODE_ID: s1-c
+      SHARD: "1"
+      PORT: "4000"
+      COORDINATOR_URL: "http://coordinator:3006"
+      DATA_DIR: /data
+    volumes:
+      - data-s1-c:/data
+
+  storage-s2-a:
+    <<: *storage
+    environment:
+      NODE_ID: s2-a
       SHARD: "2"
       PORT: "4000"
       COORDINATOR_URL: "http://coordinator:3006"
       DATA_DIR: /data
     volumes:
-      - data-s2-primary:/data
+      - data-s2-a:/data
 
-  storage-s2-replica:
+  storage-s2-b:
     <<: *storage
     environment:
-      NODE_ID: s2-replica
+      NODE_ID: s2-b
       SHARD: "2"
       PORT: "4000"
       COORDINATOR_URL: "http://coordinator:3006"
       DATA_DIR: /data
     volumes:
-      - data-s2-replica:/data
+      - data-s2-b:/data
+
+  storage-s2-c:
+    <<: *storage
+    environment:
+      NODE_ID: s2-c
+      SHARD: "2"
+      PORT: "4000"
+      COORDINATOR_URL: "http://coordinator:3006"
+      DATA_DIR: /data
+    volumes:
+      - data-s2-c:/data
 
   request-service:
-    <<: *service
+    <<: [*service, *hardened]
     build:
       context: .
       dockerfile: services/request-service/Dockerfile
@@ -139,7 +178,7 @@ services:
       retries: 10
 
   matching-service:
-    <<: *service
+    <<: [*service, *hardened]
     build:
       context: .
       dockerfile: services/matching-service/Dockerfile
@@ -161,7 +200,7 @@ services:
       retries: 10
 
   web:
-    <<: *service
+    <<: [*service, *hardened]
     build:
       context: web
     environment:
@@ -182,9 +221,12 @@ services:
 
 volumes:
   rabbitmq-data:
-  data-s0-primary:
-  data-s0-replica:
-  data-s1-primary:
-  data-s1-replica:
-  data-s2-primary:
-  data-s2-replica:
+  data-s0-a:
+  data-s0-b:
+  data-s0-c:
+  data-s1-a:
+  data-s1-b:
+  data-s1-c:
+  data-s2-a:
+  data-s2-b:
+  data-s2-c:

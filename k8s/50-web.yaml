@@ -11,6 +11,12 @@ spec:
     metadata:
       labels: {app: web}
     spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000          # so the volume of a storage node is writable by the non-root user
+        seccompProfile: {type: RuntimeDefault}
       containers:
         - name: web
           image: emergency/web:latest
@@ -29,6 +35,9 @@ spec:
             initialDelaySeconds: 15
             periodSeconds: 10
             failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
           resources:
             requests: {cpu: 50m, memory: 128Mi}
             limits: {memory: 384Mi}

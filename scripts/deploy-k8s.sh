@@ -3,7 +3,14 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-minikube status >/dev/null 2>&1 || minikube start --cpus=4 --memory=4096
+# Calico enforces the NetworkPolicies in k8s/80-network-policies.yaml (minikube's default does not).
+minikube status >/dev/null 2>&1 || minikube start --cpus=4 --memory=6144 --cni=calico
+if ! kubectl -n kube-system get pods 2>/dev/null | grep -q calico; then
+  echo "WARNING: this minikube cluster has no Calico, so NetworkPolicies are NOT enforced."
+  echo "         Recreate it with: minikube delete && ./scripts/deploy-k8s.sh"
+fi
+# The autoscalers (k8s/70-autoscaling.yaml) read CPU usage from metrics-server.
+minikube addons enable metrics-server >/dev/null
 ./scripts/build-images.sh
 
 kubectl apply -f k8s/00-namespace.yaml

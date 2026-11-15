@@ -13,6 +13,12 @@ spec:
     metadata:
       labels: {app: rabbitmq}
     spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999          # the broker data volume is writable by the rabbitmq user (uid 999)
+        seccompProfile: {type: RuntimeDefault}
       containers:
         - name: rabbitmq
           image: rabbitmq:3.13-management
@@ -33,6 +39,9 @@ spec:
             initialDelaySeconds: 60
             periodSeconds: 20
             timeoutSeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
           resources:
             requests: {cpu: 100m, memory: 256Mi}
             limits: {memory: 768Mi}

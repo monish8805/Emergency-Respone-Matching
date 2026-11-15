@@ -1,0 +1,57 @@
+# Scales the stateless tiers on CPU. Needs the metrics-server add-on (scripts/deploy-k8s.sh enables
+# it on minikube). CPU is measured against the 50m request in each Deployment, so 60% is 30m.
+# The coordinator is not autoscaled (one leader does the work), and the storage nodes are a fixed
+# 3 per shard because the shard layout is part of the key routing.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: request-service
+  namespace: emergency
+spec:
+  scaleTargetRef: {apiVersion: apps/v1, kind: Deployment, name: request-service}
+  minReplicas: 2
+  maxReplicas: 6
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target: {type: Utilization, averageUtilization: 60}
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 120
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: matching-service
+  namespace: emergency
+spec:
+  scaleTargetRef: {apiVersion: apps/v1, kind: Deployment, name: matching-service}
+  minReplicas: 1
+  maxReplicas: 4
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target: {type: Utilization, averageUtilization: 60}
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 120
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: web
+  namespace: emergency
+spec:
+  scaleTargetRef: {apiVersion: apps/v1, kind: Deployment, name: web}
+  minReplicas: 1
+  maxReplicas: 4
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target: {type: Utilization, averageUtilization: 60}
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 120

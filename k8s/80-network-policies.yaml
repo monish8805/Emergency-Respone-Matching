@@ -1,0 +1,84 @@
+# Only the paths the system uses are open. Everything else inside the namespace is denied.
+# NetworkPolicy is enforced by the cluster's network plugin: scripts/deploy-k8s.sh starts minikube
+# with Calico for that (minikube's default plugin accepts these objects but does not enforce them).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+  namespace: emergency
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+---
+# The two NodePort entry points: the UI and the public API.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-web
+  namespace: emergency
+spec:
+  podSelector:
+    matchLabels: {app: web}
+  policyTypes: [Ingress]
+  ingress:
+    - ports: [{port: 3000}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-request-service
+  namespace: emergency
+spec:
+  podSelector:
+    matchLabels: {app: request-service}
+  policyTypes: [Ingress]
+  ingress:
+    - ports: [{port: 3005}]
+---
+# The coordinator's /internal API: only the services and the storage nodes.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-coordinator-from-cluster-components
+  namespace: emergency
+spec:
+  podSelector:
+    matchLabels: {app: coordinator}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector: {matchLabels: {app: request-service}}
+        - podSelector: {matchLabels: {app: matching-service}}
+        - podSelector: {matchLabels: {app: storage}}
+      ports: [{port: 3006}]
+---
+# Storage nodes accept connections from the coordinator only.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-storage-from-coordinator
+  namespace: emergency
+spec:
+  podSelector:
+    matchLabels: {app: storage}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector: {matchLabels: {app: coordinator}}
+      ports: [{port: 4000}]
+---
+# RabbitMQ is used by the request and matching services. Its management port (15672) is not opened.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-rabbitmq-from-services
+  namespace: emergency
+spec:
+  podSelector:
+    matchLabels: {app: rabbitmq}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector: {matchLabels: {app: request-service}}
+        - podSelector: {matchLabels: {app: matching-service}}
+      ports: [{port: 5672}]
