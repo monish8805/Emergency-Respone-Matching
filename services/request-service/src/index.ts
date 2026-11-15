@@ -15,6 +15,8 @@ const app = createRequestApp({
   publishMatch: (requestId) => publisher.publish({ requestId }),
   checkRabbit: () => publisher.check(),
   coordinatorHealth: () => store.health(),
+  // Optional: ZONES="Zone A,Zone B" refuses any other zone name (coordinates are always accepted).
+  zones: (process.env.ZONES ?? "").split(",").map((z) => z.trim()).filter(Boolean),
 });
 
 const server = app.listen(port, () => console.log(`request service on :${port}`));

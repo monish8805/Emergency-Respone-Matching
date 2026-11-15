@@ -7,7 +7,7 @@
   "types": "src/index.ts",
   "dependencies": {
     "amqplib": "^0.10.5",
-    "zod": "^3.23.8"
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "@types/amqplib": "^0.10.5"

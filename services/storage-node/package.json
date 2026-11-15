@@ -3,6 +3,7 @@
   "private": true,
   "type": "module",
   "dependencies": {
+    "@emergency/shared": "*",
     "express": "^5.1.0"
   }
 }

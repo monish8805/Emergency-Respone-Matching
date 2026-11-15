@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import request from "supertest";
-import { MemoryStore, requestKey, resourceKey, type Resource } from "@emergency/shared";
+import { MemoryStore, StoreUnavailableError, requestKey, resourceKey, type Resource } from "@emergency/shared";
 import { createRequestApp } from "../src/app";
 
 function setup(options: { publishFails?: boolean } = {}) {
@@ -38,7 +38,7 @@ describe("request service", () => {
     await new Promise((r) => setTimeout(r, 5));
     const second = await request(app).post("/requests").send({ type: "food", location: "B" }).expect(201);
     const list = await request(app).get("/requests").expect(200);
-    expect(list.body.map((r: { id: string }) => r.id)).toEqual([second.body.id, first.body.id]);
+    expect(list.body.items.map((r: { id: string }) => r.id)).toEqual([second.body.id, first.body.id]);
   });
 
   it("rejects an invalid request type with 400", async () => {
@@ -55,8 +55,8 @@ describe("request service", () => {
     const { app } = setup();
     await request(app).post("/resources").send({ type: "food", location: "Zone A" }).expect(201);
     const list = await request(app).get("/resources").expect(200);
-    expect(list.body).toHaveLength(1);
-    expect(list.body[0].status).toBe("AVAILABLE");
+    expect(list.body.items).toHaveLength(1);
+    expect(list.body.items[0].status).toBe("AVAILABLE");
   });
 
   it("returns 409 when matching a request that is no longer pending", async () => {
@@ -107,7 +107,7 @@ describe("request service", () => {
     expect(await store.list("resource:medicine:")).toHaveLength(1);
     expect(await store.list("resource:water:")).toHaveLength(0);
     const all = await request(app).get("/resources").expect(200);
-    expect(all.body).toHaveLength(1);
+    expect(all.body.items).toHaveLength(1);
   });
 
   it("updates request and resource statuses and validates them", async () => {
@@ -168,7 +168,7 @@ describe("request service", () => {
     expect(created.every((r) => r.status === 201)).toBe(true);
     expect(new Set(created.map((r) => r.body.id)).size).toBe(20);
     expect(queued).toHaveLength(20);
-    expect((await request(app).get("/requests").expect(200)).body).toHaveLength(20);
+    expect((await request(app).get("/requests").expect(200)).body.items).toHaveLength(20);
   });
 
   it("reports system health and has root and health endpoints", async () => {
@@ -179,5 +179,126 @@ describe("request service", () => {
     expect(sys.body).toMatchObject({ requestService: "up", rabbitmq: "up", coordinator: { reachable: true, ok: true } });
     const down = setup({ publishFails: true });
     expect((await request(down.app).get("/system").expect(200)).body.rabbitmq).toBe("down");
+  });
+
+  describe("idempotency", () => {
+    const body = { type: "water", location: "Zone A", details: "flood" };
+
+    it("a repeated create with the same key returns the same request and queues it once per attempt", async () => {
+      const { app } = setup();
+      const key = "double-click-0001";
+      const [a, b] = await Promise.all([
+        request(app).post("/requests").set("Idempotency-Key", key).send(body),
+        request(app).post("/requests").set("Idempotency-Key", key).send(body),
+      ]);
+      expect(a.body.id).toBe(b.body.id);
+      expect([a.status, b.status].sort()).toEqual([200, 201]);
+      const list = await request(app).get("/requests").expect(200);
+      expect(list.body.total).toBe(1);
+    });
+
+    it("a retry after a refused (503) write does not create a duplicate", async () => {
+      // The store accepts the write but then reports failure, like a coordinator that stored the
+      // record on a replica and still answered 503.
+      const store = new MemoryStore();
+      let fail = true;
+      const flaky = Object.create(store) as MemoryStore;
+      flaky.cas = async (k, v, value) => {
+        const ok = await store.cas(k, v, value);
+        if (fail) throw new StoreUnavailableError("503");
+        return ok;
+      };
+      const app = createRequestApp({ store: flaky, publishMatch: async () => {} });
+      const key = "retry-after-503-1";
+      await request(app).post("/requests").set("Idempotency-Key", key).send(body).expect(503);
+      fail = false;
+      const retry = await request(app).post("/requests").set("Idempotency-Key", key).send(body).expect(200);
+      expect(retry.headers["idempotent-replay"]).toBe("true");
+      expect((await request(app).get("/requests")).body.total).toBe(1);
+    });
+
+    it("refuses a key that was used for a different request", async () => {
+      const { app } = setup();
+      const key = "reused-key-00001";
+      await request(app).post("/requests").set("Idempotency-Key", key).send(body).expect(201);
+      await request(app).post("/requests").set("Idempotency-Key", key).send({ ...body, type: "food" }).expect(409);
+    });
+
+    it("rejects a malformed key and works the same for resources", async () => {
+      const { app } = setup();
+      await request(app).post("/requests").set("Idempotency-Key", "short").send(body).expect(400);
+      const key = "resource-key-0001";
+      const a = await request(app).post("/resources").set("Idempotency-Key", key).send({ type: "food", location: "Z" }).expect(201);
+      const b = await request(app).post("/resources").set("Idempotency-Key", key).send({ type: "food", location: "Z" }).expect(200);
+      expect(b.body.id).toBe(a.body.id);
+      expect((await request(app).get("/resources")).body.total).toBe(1);
+    });
+  });
+
+  describe("pagination", () => {
+    it("pages through requests with a cursor, without gaps or repeats", async () => {
+      const { app } = setup();
+      for (let i = 0; i < 7; i++) {
+        await request(app).post("/requests").send({ type: "food", location: `Zone ${i}` }).expect(201);
+      }
+      const seen: string[] = [];
+      let cursor: string | null = null;
+      let pages = 0;
+      do {
+        const res: request.Response = await request(app).get("/requests").query({ limit: 3, ...(cursor ? { cursor } : {}) }).expect(200);
+        expect(res.body.total).toBe(7);
+        seen.push(...res.body.items.map((r: { id: string }) => r.id));
+        cursor = res.body.nextCursor;
+        pages++;
+      } while (cursor);
+      expect(pages).toBe(3);
+      expect(new Set(seen).size).toBe(7);
+    });
+
+    it("rejects a bad limit or cursor and filters resources by type", async () => {
+      const { app } = setup();
+      await request(app).get("/requests?limit=0").expect(400);
+      await request(app).get("/requests?limit=100000").expect(400);
+      await request(app).get("/requests?cursor=bm9wZQ").expect(400);
+      await request(app).post("/resources").send({ type: "water", location: "A" }).expect(201);
+      await request(app).post("/resources").send({ type: "food", location: "A" }).expect(201);
+      const water = await request(app).get("/resources?type=water").expect(200);
+      expect(water.body.items.map((r: Resource) => r.type)).toEqual(["water"]);
+      await request(app).get("/resources?type=gold").expect(400);
+    });
+  });
+
+  describe("location validation", () => {
+    it.each(["91, 10", "12.97, 190", "123", "!!!", "  ", "-", "Zone <script>", "x".repeat(61)])("rejects %j", async (location) => {
+      const { app } = setup();
+      await request(app).post("/requests").send({ type: "water", location }).expect(400);
+      await request(app).post("/resources").send({ type: "water", location }).expect(400);
+    });
+
+    it.each(["Zone A", "12.97, 77.59", "(12.97, 77.59)", "St. John's Ward-2", "Zürich"])("accepts %j", async (location) => {
+      const { app } = setup();
+      await request(app).post("/requests").send({ type: "water", location }).expect(201);
+    });
+
+    it("with a zone list, refuses unknown zones but still accepts coordinates", async () => {
+      const app = createRequestApp({ store: new MemoryStore(), publishMatch: async () => {}, zones: ["Zone A", "Zone B"] });
+      await request(app).post("/requests").send({ type: "water", location: "asdf" }).expect(400);
+      await request(app).post("/requests").send({ type: "water", location: "zone a" }).expect(201);
+      await request(app).post("/requests").send({ type: "water", location: "12.97, 77.59" }).expect(201);
+    });
+  });
+
+  describe("error messages", () => {
+    it("explains an oversized body with 413", async () => {
+      const { app } = setup();
+      const res = await request(app).post("/requests").send({ type: "water", location: "A", details: "x".repeat(200_000) }).expect(413);
+      expect(res.body.error).toBe("request body too large (limit 100 KB)");
+    });
+
+    it("explains malformed JSON with 400", async () => {
+      const { app } = setup();
+      const res = await request(app).post("/requests").set("content-type", "application/json").send("{nope").expect(400);
+      expect(res.body.error).toBe("malformed request body: send valid JSON");
+    });
   });
 });

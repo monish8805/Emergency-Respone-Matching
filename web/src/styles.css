@@ -39,3 +39,5 @@ select.CANCELLED { background: #eee; }
 .hint { display: block; margin-top: 4px; font-weight: 400; font-size: .75rem; color: #65676b; }
 .muted { color: #65676b; }
 select:disabled { opacity: .75; cursor: not-allowed; }
+.pager { display: flex; align-items: center; justify-content: flex-end; gap: 12px; margin-top: 8px; }
+button:disabled { opacity: 0.55; cursor: not-allowed; }

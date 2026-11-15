@@ -1,4 +1,5 @@
 import express from "express";
+import { httpErrorMessage } from "@emergency/shared";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { rename, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
@@ -93,7 +94,7 @@ export function createStorageApp(nodeId: string, shard: number, options: Storage
   app.use((err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
     const status = typeof (err as { status?: unknown }).status === "number" ? (err as { status: number }).status : 500;
     if (status === 500) console.error(err);
-    res.status(status).json({ error: status === 500 ? "internal error" : "bad request" });
+    res.status(status).json({ error: httpErrorMessage(status, "1mb") });
   });
 
   return { app, data };

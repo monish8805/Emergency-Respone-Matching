@@ -1,7 +1,8 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { createFileRoute } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
+  PAGE_SIZE,
   REQUEST_NEXT,
   RESOURCE_STATUSES,
   RESOURCE_TYPES,
@@ -45,8 +46,24 @@ function Home() {
 
   // No automatic retries: the poll already retries every few seconds, and retries would only keep
   // the page on "Loading…" for longer when the backend is down.
-  const requests = useQuery({ queryKey: ["requests"], queryFn: () => listRequests(), refetchInterval: POLL_MS, retry: false });
-  const resources = useQuery({ queryKey: ["resources"], queryFn: () => listResources(), refetchInterval: POLL_MS, retry: false });
+  // Each list shows one page. The poll refreshes only the page on screen, so the payload stays
+  // small however many rows exist. `trail` holds the cursors of the pages already passed.
+  const [requestTrail, setRequestTrail] = useState<string[]>([]);
+  const [resourceTrail, setResourceTrail] = useState<string[]>([]);
+  const requestCursor = requestTrail[requestTrail.length - 1];
+  const resourceCursor = resourceTrail[resourceTrail.length - 1];
+  const requests = useQuery({
+    queryKey: ["requests", requestCursor ?? null],
+    queryFn: () => listRequests({ data: { cursor: requestCursor } }),
+    refetchInterval: POLL_MS,
+    retry: false,
+  });
+  const resources = useQuery({
+    queryKey: ["resources", resourceCursor ?? null],
+    queryFn: () => listResources({ data: { cursor: resourceCursor } }),
+    refetchInterval: POLL_MS,
+    retry: false,
+  });
   const requestsError = useStickyError(requests);
   const resourcesError = useStickyError(resources);
   const system = useQuery({ queryKey: ["system"], queryFn: () => getSystem(), refetchInterval: POLL_MS, retry: false });
@@ -76,8 +93,8 @@ function Home() {
   const loadError = requestsError ?? resourcesError;
   const error = actionError ?? (loadError ? new Error(`Cannot load data: ${loadError.message}`) : null);
 
-  const requestList = requests.data ?? [];
-  const resourceList = resources.data ?? [];
+  const requestList = requests.data?.items ?? [];
+  const resourceList = resources.data?.items ?? [];
 
   const requestLabel = (id: string | null | undefined) => {
     if (!id) return "—";
@@ -104,7 +121,7 @@ function Home() {
       </div>
 
       <section>
-        <h2>Requests{requests.data ? ` (${requestList.length})` : ""}</h2>
+        <h2>Requests{requests.data ? ` (${requests.data.total})` : ""}</h2>
         <table>
           <thead>
             <tr>
@@ -156,10 +173,17 @@ function Home() {
             ))}
           </tbody>
         </table>
+        <Pager
+          page={requestTrail.length + 1}
+          pageCount={Math.max(1, Math.ceil((requests.data?.total ?? 0) / PAGE_SIZE))}
+          hasNext={Boolean(requests.data?.nextCursor)}
+          onPrev={() => setRequestTrail((t) => t.slice(0, -1))}
+          onNext={() => requests.data?.nextCursor && setRequestTrail((t) => [...t, requests.data!.nextCursor!])}
+        />
       </section>
 
       <section>
-        <h2>Resources{resources.data ? ` (${resourceList.length})` : ""}</h2>
+        <h2>Resources{resources.data ? ` (${resources.data.total})` : ""}</h2>
         <table>
           <thead>
             <tr>
@@ -199,9 +223,70 @@ function Home() {
             ))}
           </tbody>
         </table>
+        <Pager
+          page={resourceTrail.length + 1}
+          pageCount={Math.max(1, Math.ceil((resources.data?.total ?? 0) / PAGE_SIZE))}
+          hasNext={Boolean(resources.data?.nextCursor)}
+          onPrev={() => setResourceTrail((t) => t.slice(0, -1))}
+          onNext={() => resources.data?.nextCursor && setResourceTrail((t) => [...t, resources.data!.nextCursor!])}
+        />
       </section>
     </main>
   );
+}
+
+function Pager({
+  page,
+  pageCount,
+  hasNext,
+  onPrev,
+  onNext,
+}: {
+  page: number;
+  pageCount: number;
+  hasNext: boolean;
+  onPrev: () => void;
+  onNext: () => void;
+}) {
+  if (page === 1 && !hasNext) return null;
+  return (
+    <div className="pager">
+      <button type="button" onClick={onPrev} disabled={page === 1}>
+        Previous
+      </button>
+      <span className="muted">
+        Page {page} of {pageCount}
+      </span>
+      <button type="button" onClick={onNext} disabled={!hasNext}>
+        Next
+      </button>
+    </div>
+  );
+}
+
+// Guards a form against double submission. The ref is checked synchronously, so a second click
+// that lands before React re-renders is ignored too. The idempotency key stays the same until the
+// submission succeeds, so retrying after an error cannot create a duplicate either.
+function useSubmitOnce<D extends { idempotencyKey: string }>(send: (data: D) => Promise<unknown>) {
+  const [busy, setBusy] = useState(false);
+  const inFlight = useRef(false);
+  const key = useRef(crypto.randomUUID());
+  const submit = async (data: Omit<D, "idempotencyKey">): Promise<boolean> => {
+    if (inFlight.current) return false;
+    inFlight.current = true;
+    setBusy(true);
+    try {
+      await send({ ...data, idempotencyKey: key.current } as D);
+      key.current = crypto.randomUUID();
+      return true;
+    } catch {
+      return false; // the error banner shows the message
+    } finally {
+      inFlight.current = false;
+      setBusy(false);
+    }
+  };
+  return { busy, submit };
 }
 
 function HealthPanel({
@@ -235,7 +320,8 @@ function HealthPanel({
         <Chip
           key={sh.shard}
           label={`Shard ${sh.shard}`}
-          state={sh.live === sh.total ? "up" : sh.live > 0 ? "degraded" : "down"}
+          // Below a majority the shard refuses reads and writes, so that counts as down.
+          state={sh.live === sh.total ? "up" : sh.live >= (sh.quorum ?? 1) ? "degraded" : "down"}
           detail={`${sh.live}/${sh.total} nodes${nodes
             .filter((n) => n.shard === sh.shard && n.status !== "up")
             .map((n) => ` · ${n.id} ${n.status}`)
@@ -281,20 +367,18 @@ function StatusSelect({
 function RequestForm({
   onSubmit,
 }: {
-  onSubmit: (d: { type: ResourceType; location: string; details: string }) => Promise<unknown>;
+  onSubmit: (d: { type: ResourceType; location: string; details: string; idempotencyKey: string }) => Promise<unknown>;
 }) {
+  const { busy, submit: submitOnce } = useSubmitOnce(onSubmit);
   const [type, setType] = useState<ResourceType>("water");
   const [location, setLocation] = useState("");
   const [details, setDetails] = useState("");
 
   const submit = async (e: FormEvent) => {
     e.preventDefault();
-    try {
-      await onSubmit({ type, location, details });
+    if (await submitOnce({ type, location, details })) {
       setLocation("");
       setDetails("");
-    } catch {
-      // the error banner shows the message
     }
   };
 
@@ -319,7 +403,9 @@ function RequestForm({
           rows={3}
         />
       </label>
-      <button type="submit">Submit request</button>
+      <button type="submit" disabled={busy}>
+        {busy ? "Submitting…" : "Submit request"}
+      </button>
     </form>
   );
 }
@@ -327,20 +413,16 @@ function RequestForm({
 function ResourceForm({
   onSubmit,
 }: {
-  onSubmit: (d: { type: ResourceType; location: string; availability: boolean }) => Promise<unknown>;
+  onSubmit: (d: { type: ResourceType; location: string; availability: boolean; idempotencyKey: string }) => Promise<unknown>;
 }) {
+  const { busy, submit: submitOnce } = useSubmitOnce(onSubmit);
   const [type, setType] = useState<ResourceType>("water");
   const [location, setLocation] = useState("");
   const [availability, setAvailability] = useState(true);
 
   const submit = async (e: FormEvent) => {
     e.preventDefault();
-    try {
-      await onSubmit({ type, location, availability });
-      setLocation("");
-    } catch {
-      // the error banner shows the message
-    }
+    if (await submitOnce({ type, location, availability })) setLocation("");
   };
 
   return (
@@ -359,7 +441,9 @@ function ResourceForm({
         <input type="checkbox" checked={availability} onChange={(e) => setAvailability(e.target.checked)} />
         Available now
       </label>
-      <button type="submit">Register resource</button>
+      <button type="submit" disabled={busy}>
+        {busy ? "Registering…" : "Register resource"}
+      </button>
     </form>
   );
 }

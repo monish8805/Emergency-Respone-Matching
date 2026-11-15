@@ -13,6 +13,16 @@ import {
   InvalidTransitionError,
   StoreUnavailableError,
   UpdateConflictError,
+  InvalidCursorError,
+  IDEMPOTENCY_KEY,
+  DEFAULT_PAGE_SIZE,
+  MAX_PAGE_SIZE,
+  idFromIdempotencyKey,
+  paginate,
+  parseCoordinates,
+  resourcePrefix,
+  httpErrorMessage,
+  REQUEST_TYPES,
   canTransition,
   REQUEST_TRANSITIONS,
   updateRecord,
@@ -28,14 +38,51 @@ export interface RequestAppDeps {
   // Optional probes used by GET /system. When absent the component is reported as "unknown".
   checkRabbit?: () => Promise<boolean>;
   coordinatorHealth?: () => Promise<unknown>;
+  // Optional list of allowed zone names (case-insensitive). When set, a location must be valid
+  // coordinates or one of these zones, so typos like "asdf" are refused instead of stored.
+  zones?: string[];
 }
 
-export function createRequestApp({ store, publishMatch, checkRabbit, coordinatorHealth }: RequestAppDeps) {
+const BODY_LIMIT = "100kb";
+
+export function createRequestApp({ store, publishMatch, checkRabbit, coordinatorHealth, zones }: RequestAppDeps) {
   const app = express();
-  app.use(express.json({ limit: "100kb" }));
+  app.use(express.json({ limit: BODY_LIMIT }));
 
   const invalid = (res: express.Response, error: ZodError) =>
     res.status(400).json({ error: "invalid request", details: error.flatten() });
+
+  const allowedZones = zones && zones.length > 0 ? new Set(zones.map((z) => z.trim().toLowerCase())) : null;
+  const unknownZone = (location: string) =>
+    allowedZones !== null && !parseCoordinates(location) && !allowedZones.has(location.trim().toLowerCase());
+  const rejectZone = (res: express.Response) =>
+    res.status(400).json({
+      error: "invalid request",
+      details: { fieldErrors: { location: [`unknown zone, use coordinates or one of: ${[...(zones ?? [])].join(", ")}`] } },
+    });
+
+  // Reads the optional Idempotency-Key header. Returns undefined when absent, null after replying 400.
+  const idempotencyKey = (req: express.Request, res: express.Response): string | undefined | null => {
+    const raw = req.header("idempotency-key");
+    if (raw === undefined) return undefined;
+    if (!IDEMPOTENCY_KEY.test(raw)) {
+      res.status(400).json({ error: "Idempotency-Key must be 8-100 characters: letters, digits, _ or -" });
+      return null;
+    }
+    return raw;
+  };
+
+  // ?limit= and ?cursor= for the list endpoints. Replies 400 and returns null when they are invalid.
+  const pageParams = (req: express.Request, res: express.Response) => {
+    const rawLimit = req.query.limit;
+    const limit = rawLimit === undefined ? DEFAULT_PAGE_SIZE : Number(rawLimit);
+    if (!Number.isInteger(limit) || limit < 1 || limit > MAX_PAGE_SIZE) {
+      res.status(400).json({ error: `limit must be a whole number from 1 to ${MAX_PAGE_SIZE}` });
+      return null;
+    }
+    const cursor = typeof req.query.cursor === "string" && req.query.cursor ? req.query.cursor : undefined;
+    return { limit, cursor };
+  };
 
   app.get("/", (_req, res) =>
     res.json({ service: "request-service", health: "/health", system: "/system", docs: "see README" }),
@@ -44,15 +91,36 @@ export function createRequestApp({ store, publishMatch, checkRabbit, coordinator
   app.post("/requests", async (req, res) => {
     const parsed = createRequestSchema.safeParse(req.body);
     if (!parsed.success) return invalid(res, parsed.error);
+    if (unknownZone(parsed.data.location)) return rejectZone(res);
+    const key = idempotencyKey(req, res);
+    if (key === null) return;
 
     const record: EmergencyRequest = {
-      id: randomUUID(),
+      // With an Idempotency-Key the id comes from the key, so a retry targets the same record.
+      id: key ? idFromIdempotencyKey(key) : randomUUID(),
       ...parsed.data,
       status: "PENDING",
       resourceId: null,
       createdAt: new Date().toISOString(),
     };
-    await store.put(requestKey(record.id), record);
+    // Create-only: succeeds only if the record does not exist yet.
+    let replay = false;
+    if (!(await store.cas(requestKey(record.id), null, record))) {
+      const existing = await store.get<EmergencyRequest>(requestKey(record.id));
+      if (
+        !existing ||
+        existing.type !== record.type ||
+        existing.location !== record.location ||
+        existing.details !== record.details
+      ) {
+        return res.status(409).json({ error: "Idempotency-Key was already used for a different request" });
+      }
+      // A retry of a request that was stored (even if the first attempt was answered 503).
+      // Return it as it is now; queue matching again only if it is still waiting.
+      if (existing.status !== "PENDING") return res.set("idempotent-replay", "true").status(200).json(existing);
+      replay = true;
+      Object.assign(record, existing);
+    }
     try {
       await publishMatch(record.id);
     } catch (err) {
@@ -61,13 +129,19 @@ export function createRequestApp({ store, publishMatch, checkRabbit, coordinator
       console.error(`could not queue request ${record.id}, the sweeper will retry: ${String(err)}`);
       res.set("x-match-queued", "false");
     }
-    res.status(201).json(record);
+    if (replay) res.set("idempotent-replay", "true");
+    res.status(replay ? 200 : 201).json(record);
   });
 
-  app.get("/requests", async (_req, res) => {
+  app.get("/requests", async (req, res) => {
+    const page = pageParams(req, res);
+    if (!page) return;
     const entries = await store.list<EmergencyRequest>(REQUEST_PREFIX);
-    const requests = entries.map((e) => e.value).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-    res.json(requests);
+    // Newest first; the id breaks ties so the order (and every cursor) is stable.
+    const requests = entries
+      .map((e) => e.value)
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt) || b.id.localeCompare(a.id));
+    res.json(paginate(requests, (r) => r.id, page.cursor, page.limit));
   });
 
   app.get("/requests/:id", async (req, res) => {
@@ -101,21 +175,38 @@ export function createRequestApp({ store, publishMatch, checkRabbit, coordinator
   app.post("/resources", async (req, res) => {
     const parsed = registerResourceSchema.safeParse(req.body);
     if (!parsed.success) return invalid(res, parsed.error);
+    if (unknownZone(parsed.data.location)) return rejectZone(res);
+    const key = idempotencyKey(req, res);
+    if (key === null) return;
     const { availability, ...rest } = parsed.data;
     const record: Resource = {
-      id: newResourceId(rest.type, randomUUID()),
+      id: newResourceId(rest.type, key ? idFromIdempotencyKey(key) : randomUUID()),
       ...rest,
       availability,
       status: availability ? "AVAILABLE" : "UNAVAILABLE",
       assignedRequestId: null,
     };
-    await store.put(resourceKey(record.id), record);
+    if (!(await store.cas(resourceKey(record.id), null, record))) {
+      const existing = await store.get<Resource>(resourceKey(record.id));
+      if (!existing || existing.type !== record.type || existing.location !== record.location) {
+        return res.status(409).json({ error: "Idempotency-Key was already used for a different resource" });
+      }
+      return res.set("idempotent-replay", "true").status(200).json(existing);
+    }
     res.status(201).json(record);
   });
 
-  app.get("/resources", async (_req, res) => {
-    const entries = await store.list<Resource>(RESOURCE_PREFIX);
-    res.json(entries.map((e) => e.value));
+  app.get("/resources", async (req, res) => {
+    const page = pageParams(req, res);
+    if (!page) return;
+    // ?type=water lists only that type: the storage nodes filter by key prefix themselves.
+    const type = req.query.type;
+    if (type !== undefined && !(REQUEST_TYPES as readonly unknown[]).includes(type)) {
+      return res.status(400).json({ error: `type must be one of: ${REQUEST_TYPES.join(", ")}` });
+    }
+    const entries = await store.list<Resource>(type === undefined ? RESOURCE_PREFIX : resourcePrefix(type as (typeof REQUEST_TYPES)[number]));
+    const resources = entries.map((e) => e.value).sort((a, b) => a.id.localeCompare(b.id));
+    res.json(paginate(resources, (r) => r.id, page.cursor, page.limit));
   });
 
   app.put("/resources/:id/status", async (req, res) => {
@@ -209,9 +300,10 @@ export function createRequestApp({ store, publishMatch, checkRabbit, coordinator
     if (err instanceof UpdateConflictError) {
       return res.status(409).json({ error: "too many concurrent changes, try again" });
     }
+    if (err instanceof InvalidCursorError) return res.status(400).json({ error: "invalid cursor" });
     const status = typeof (err as { status?: unknown }).status === "number" ? (err as { status: number }).status : 500;
     if (status === 500) console.error(err);
-    res.status(status).json({ error: status === 500 ? "internal error" : "bad request" });
+    res.status(status).json({ error: httpErrorMessage(status, BODY_LIMIT) });
   });
 
   return app;

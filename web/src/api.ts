@@ -53,13 +53,13 @@ function describeError(data: unknown, status: number): string {
 
 // Server functions run on the Start server, which calls the request service.
 // The browser never talks to the backend directly, so no CORS is needed.
-async function call<T>(path: string, method = "GET", body?: unknown): Promise<T> {
+async function call<T>(path: string, method = "GET", body?: unknown, extraHeaders?: Record<string, string>): Promise<T> {
   const base = process.env.API_URL ?? "http://localhost:3005";
   let res: Response;
   try {
     res = await fetch(`${base}${path}`, {
       method,
-      headers: body !== undefined ? { "content-type": "application/json" } : undefined,
+      headers: { ...(body !== undefined ? { "content-type": "application/json" } : {}), ...extraHeaders },
       body: body !== undefined ? JSON.stringify(body) : undefined,
     });
   } catch {
@@ -78,25 +78,46 @@ export interface SystemStatus {
     ok?: boolean;
     error?: string;
     nodes?: Array<{ id: string; shard: number; status: "up" | "syncing" | "down" }>;
-    shards?: Array<{ shard: number; live: number; total: number }>;
+    shards?: Array<{ shard: number; live: number; total: number; quorum?: number }>;
+    leader?: boolean;
   };
 }
 
 export const getSystem = createServerFn({ method: "GET" }).handler(() => call<SystemStatus>("/system"));
 
-export const listRequests = createServerFn({ method: "GET" }).handler(() =>
-  call<EmergencyRequest[]>("/requests"),
-);
+export const PAGE_SIZE = 25;
 
-export const listResources = createServerFn({ method: "GET" }).handler(() => call<Resource[]>("/resources"));
+export interface Page<T> {
+  items: T[];
+  nextCursor: string | null;
+  total: number;
+}
 
+export const listRequests = createServerFn({ method: "GET" })
+  .validator((d: { cursor?: string }) => d)
+  .handler(({ data }) =>
+    call<Page<EmergencyRequest>>(`/requests?limit=${PAGE_SIZE}${data.cursor ? `&cursor=${encodeURIComponent(data.cursor)}` : ""}`),
+  );
+
+export const listResources = createServerFn({ method: "GET" })
+  .validator((d: { cursor?: string }) => d)
+  .handler(({ data }) =>
+    call<Page<Resource>>(`/resources?limit=${PAGE_SIZE}${data.cursor ? `&cursor=${encodeURIComponent(data.cursor)}` : ""}`),
+  );
+
+// The idempotency key is made once per submission by the form and sent again on every retry of the
+// same submission, so a double click or a retry after an error never creates a second record.
 export const createRequest = createServerFn({ method: "POST" })
-  .validator((d: { type: ResourceType; location: string; details: string }) => d)
-  .handler(({ data }) => call<EmergencyRequest>("/requests", "POST", data));
+  .validator((d: { type: ResourceType; location: string; details: string; idempotencyKey: string }) => d)
+  .handler(({ data: { idempotencyKey, ...body } }) =>
+    call<EmergencyRequest>("/requests", "POST", body, { "idempotency-key": idempotencyKey }),
+  );
 
 export const registerResource = createServerFn({ method: "POST" })
-  .validator((d: { type: ResourceType; location: string; availability: boolean }) => d)
-  .handler(({ data }) => call<Resource>("/resources", "POST", data));
+  .validator((d: { type: ResourceType; location: string; availability: boolean; idempotencyKey: string }) => d)
+  .handler(({ data: { idempotencyKey, ...body } }) =>
+    call<Resource>("/resources", "POST", body, { "idempotency-key": idempotencyKey }),
+  );
 
 export const setRequestStatus = createServerFn({ method: "POST" })
   .validator((d: { id: string; status: RequestStatus }) => d)
