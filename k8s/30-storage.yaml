@@ -52,6 +52,9 @@ spec:
             - {name: SHARD, value: "0"}
             - {name: PORT, value: "4000"}
             - {name: DATA_DIR, value: /data}
+            - name: MONGODB_URI   # optional: from `kubectl create secret generic mongodb-credentials --from-literal=uri=...`
+              valueFrom: {secretKeyRef: {name: mongodb-credentials, key: uri, optional: true}}
+            - {name: MONGODB_DB, value: emergency}
             - name: COORDINATOR_URL
               valueFrom: {configMapKeyRef: {name: app-config, key: COORDINATOR_URL}}
           ports:
@@ -135,6 +138,9 @@ spec:
             - {name: SHARD, value: "1"}
             - {name: PORT, value: "4000"}
             - {name: DATA_DIR, value: /data}
+            - name: MONGODB_URI   # optional: from `kubectl create secret generic mongodb-credentials --from-literal=uri=...`
+              valueFrom: {secretKeyRef: {name: mongodb-credentials, key: uri, optional: true}}
+            - {name: MONGODB_DB, value: emergency}
             - name: COORDINATOR_URL
               valueFrom: {configMapKeyRef: {name: app-config, key: COORDINATOR_URL}}
           ports:
@@ -218,6 +224,9 @@ spec:
             - {name: SHARD, value: "2"}
             - {name: PORT, value: "4000"}
             - {name: DATA_DIR, value: /data}
+            - name: MONGODB_URI   # optional: from `kubectl create secret generic mongodb-credentials --from-literal=uri=...`
+              valueFrom: {secretKeyRef: {name: mongodb-credentials, key: uri, optional: true}}
+            - {name: MONGODB_DB, value: emergency}
             - name: COORDINATOR_URL
               valueFrom: {configMapKeyRef: {name: app-config, key: COORDINATOR_URL}}
           ports:

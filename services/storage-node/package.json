@@ -4,6 +4,7 @@
   "type": "module",
   "dependencies": {
     "@emergency/shared": "*",
-    "express": "^5.1.0"
+    "express": "^5.1.0",
+    "mongodb": "^6.10.0"
   }
 }

@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { rename, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 
-interface Entry {
+export interface Entry {
   value: unknown;
   version: number;
 }
@@ -12,6 +12,12 @@ interface Entry {
 export interface StorageOptions {
   // When set, the data is written here on every change and reloaded on start.
   dataFile?: string;
+  // Entries loaded from an external store (MongoDB) before the app starts.
+  initial?: Array<[string, Entry]>;
+  // Called after every applied write so an external store (MongoDB) can save the entry.
+  onWrite?: (key: string, entry: Entry) => Promise<void>;
+  // Reported on /health.
+  backend?: string;
 }
 
 // One storage node: a versioned key-value store exposed over HTTP.
@@ -19,7 +25,8 @@ export interface StorageOptions {
 // node already holds is ignored, so a late or replayed write can never undo a newer one.
 export function createStorageApp(nodeId: string, shard: number, options: StorageOptions = {}) {
   const data = new Map<string, Entry>();
-  const { dataFile } = options;
+  const { dataFile, initial, onWrite, backend } = options;
+  if (initial) for (const [key, entry] of initial) data.set(key, entry);
 
   if (dataFile) {
     mkdirSync(dirname(dataFile), { recursive: true });
@@ -46,7 +53,7 @@ export function createStorageApp(nodeId: string, shard: number, options: Storage
   app.use(express.json({ limit: "1mb" }));
 
   app.get("/health", (_req, res) => {
-    res.json({ ok: true, nodeId, shard, keys: data.size, persistent: Boolean(dataFile) });
+    res.json({ ok: true, nodeId, shard, keys: data.size, persistent: Boolean(dataFile || onWrite), backend: backend ?? (dataFile ? "file" : "memory") });
   });
 
   // Used by the coordinator to reconcile a node that has just recovered: [key, value, version].
@@ -84,8 +91,10 @@ export function createStorageApp(nodeId: string, shard: number, options: Storage
       res.json({ ok: true, applied: false, version: existing.version });
       return;
     }
-    data.set(req.params.key, { value: req.body, version });
+    const entry = { value: req.body, version };
+    data.set(req.params.key, entry);
     await persist();
+    if (onWrite) await onWrite(req.params.key, entry);
     res.json({ ok: true, applied: true, version });
   });
 
