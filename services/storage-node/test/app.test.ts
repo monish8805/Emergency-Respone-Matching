@@ -36,6 +36,17 @@ describe("storage node", () => {
     expect(res.body).toEqual({ v: "new" });
   });
 
+  it("deletes by writing a tombstone that older writes cannot undo", async () => {
+    const { app } = createStorageApp("s0-primary", 0);
+    await put(app, "a", { v: 1 }, 5).expect(200);
+    await request(app).delete("/internal/data/a").expect(400);
+    const del = await request(app).delete("/internal/data/a").set("x-version", "6").expect(200);
+    expect(del.body.applied).toBe(true);
+    expect((await request(app).get("/internal/data/a")).body).toEqual({ __deleted: true });
+    const stale = await put(app, "a", { v: "old" }, 5).expect(200);
+    expect(stale.body.applied).toBe(false);
+  });
+
   it("dumps all entries with versions for recovery sync", async () => {
     const { app } = createStorageApp("s0-primary", 0);
     await put(app, "a", { v: 1 }, 7);

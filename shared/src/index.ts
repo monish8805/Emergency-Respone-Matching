@@ -9,3 +9,4 @@ export * from "./transitions";
 export * from "./rabbit";
 export * from "./idempotency";
 export * from "./http";
+export * from "./tombstone";

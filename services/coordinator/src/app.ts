@@ -1,5 +1,5 @@
 import express from "express";
-import { httpErrorMessage, shardFor, type NodeConfig } from "@emergency/shared";
+import { httpErrorMessage, isTombstone, shardFor, TOMBSTONE, type NodeConfig } from "@emergency/shared";
 import type { NodeRegistry } from "./nodes";
 
 type Entry = { value: unknown; version: number };
@@ -87,7 +87,9 @@ export function createCoordinatorApp(registry: NodeRegistry, { isLeader = () => 
     if (answered.length < registry.quorum(shard)) return "unavailable";
     let newest: Entry | undefined;
     for (const a of answered) if (a && (!newest || a.version > newest.version)) newest = a;
-    return newest ?? "missing";
+    // A tombstone is the newest version: the key was deleted.
+    if (!newest || isTombstone(newest.value)) return "missing";
+    return newest;
   }
 
   // Writes to every node of the shard that is alive (including nodes catching up). The write only
@@ -263,6 +265,23 @@ export function createCoordinatorApp(registry: NodeRegistry, { isLeader = () => 
     res.json(entry.value);
   });
 
+  // Delete = write a tombstone one version above the current value, under the key's lock and with
+  // the same quorum rules as any write. 404 if the key does not exist (or is already deleted).
+  app.delete("/internal/data/:key", async (req, res) => {
+    const key = req.params.key;
+    const shard = shardFor(key, registry.shardCount());
+    const outcome = await withLock(key, async () => {
+      const current = await readEntry(shard, key);
+      if (current === "unavailable") return { code: 503 as const };
+      if (current === "missing") return { code: 404 as const };
+      const written = await writeEntry(shard, key, TOMBSTONE, current.version + 1);
+      return written.ok ? { code: 200 as const, written } : { code: 503 as const };
+    });
+    if (outcome.code === 200) res.json({ ok: true, shard, replicasWritten: outcome.written.replicas, version: outcome.written.version });
+    else if (outcome.code === 404) res.status(404).json({ error: "not found" });
+    else res.status(503).json({ error: `shard ${shard} unavailable` });
+  });
+
   // Compare-and-set: succeeds only if the key is still at expectedVersion (null = must not exist).
   app.post("/internal/cas/:key", async (req, res) => {
     const key = req.params.key;
@@ -305,7 +324,7 @@ export function createCoordinatorApp(registry: NodeRegistry, { isLeader = () => 
           if (!have || version > have.version) newest.set(key, { key, value, version });
         }
       }
-      found.push(...newest.values());
+      found.push(...[...newest.values()].filter((e) => !isTombstone(e.value)));
     }
     res.json(found);
   });

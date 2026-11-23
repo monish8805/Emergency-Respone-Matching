@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import request from "supertest";
 import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
-import { shardFor, type NodeConfig } from "@emergency/shared";
+import { isTombstone as isTombstoneValue, shardFor, type NodeConfig } from "@emergency/shared";
 import { createStorageApp } from "../../storage-node/src/app";
 import { createCoordinatorApp } from "../src/app";
 import { NodeRegistry } from "../src/nodes";
@@ -135,6 +135,68 @@ describe("sharding and replication", () => {
     const res = await request(coordinator).get("/internal/list").query({ prefix: "resource:water:" }).expect(200);
     expect(res.body).toHaveLength(6);
     expect(res.body.every((e: { key: string }) => e.key.startsWith("resource:water:"))).toBe(true);
+  });
+});
+
+describe("delete", () => {
+  const delKey = (key: string) => request(coordinator).delete(`/internal/data/${encodeURIComponent(key)}`);
+
+  it("deletes a key so it reads as missing and disappears from lists", async () => {
+    await putKey("request:gone", { v: 1 });
+    await putKey("request:kept", { v: 2 });
+    await delKey("request:gone").expect(200);
+    await getKey("request:gone").expect(404);
+    const list = await request(coordinator).get("/internal/list").query({ prefix: "request:" }).expect(200);
+    expect(list.body.map((e: { key: string }) => e.key)).toEqual(["request:kept"]);
+    await getKey("request:kept").expect(200);
+  });
+
+  it("answers 404 for a missing or already deleted key", async () => {
+    await delKey("request:never").expect(404);
+    await putKey("request:twice", { v: 1 });
+    await delKey("request:twice").expect(200);
+    await delKey("request:twice").expect(404);
+  });
+
+  it("allows the key to be created again after a delete", async () => {
+    await putKey("request:again", { v: 1 });
+    await delKey("request:again").expect(200);
+    await request(coordinator)
+      .post(`/internal/cas/${encodeURIComponent("request:again")}`)
+      .send({ expectedVersion: null, value: { v: 2 } })
+      .expect(200);
+    expect((await getKey("request:again")).body).toEqual({ v: 2 });
+  });
+
+  it("is not undone when a node that missed the delete recovers", async () => {
+    const key = "request:stays-deleted";
+    const shard = shardFor(key, 3);
+    await putKey(key, { v: 1 });
+    const old = primaryOf(shard);
+    const port = Number(new URL(old.config.url).port);
+    const stale = new Map(old.data); // the copy it will come back with
+    await stop(old.server);
+    await delKey(key).expect(200);
+
+    const { app, data } = createStorageApp(old.config.id, shard);
+    for (const [k, e] of stale) data.set(k, e);
+    const server = await listen(app, port);
+    const back = { ...old, server, data, bootId: `boot-${++bootCounter}` };
+    storages[storages.indexOf(old)] = back;
+    await heartbeat(back);
+    await waitUntil("node back up", () => statusOf(back.config.id) === "up");
+
+    await getKey(key).expect(404);
+    expect(isTombstoneValue(back.data.get(key)!.value)).toBe(true);
+  });
+
+  it("refuses with 503 when the shard has lost its quorum", async () => {
+    const key = "request:no-quorum";
+    const shard = shardFor(key, 3);
+    await putKey(key, { v: 1 });
+    await stop(primaryOf(shard).server);
+    await stop(replicaOf(shard).server);
+    await delKey(key).expect(503);
   });
 });
 

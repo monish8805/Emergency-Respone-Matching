@@ -1,5 +1,5 @@
 import express from "express";
-import { httpErrorMessage } from "@emergency/shared";
+import { httpErrorMessage, TOMBSTONE } from "@emergency/shared";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { rename, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
@@ -76,6 +76,17 @@ export function createStorageApp(nodeId: string, shard: number, options: Storage
     res.json(entry.value);
   });
 
+  // Stores a value (or a tombstone) unless the node already holds a newer version.
+  async function apply(key: string, value: unknown, version: number) {
+    const existing = data.get(key);
+    if (existing && existing.version > version) return { ok: true, applied: false, version: existing.version };
+    const entry = { value, version };
+    data.set(key, entry);
+    await persist();
+    if (onWrite) await onWrite(key, entry);
+    return { ok: true, applied: true, version };
+  }
+
   app.put("/internal/data/:key", async (req, res) => {
     if (req.body === undefined) {
       res.status(400).json({ error: "JSON body required" });
@@ -86,16 +97,17 @@ export function createStorageApp(nodeId: string, shard: number, options: Storage
       res.status(400).json({ error: "x-version header required" });
       return;
     }
-    const existing = data.get(req.params.key);
-    if (existing && existing.version > version) {
-      res.json({ ok: true, applied: false, version: existing.version });
+    res.json(await apply(req.params.key, req.body, version));
+  });
+
+  // Deleting writes a tombstone at the given version (see shared/src/tombstone.ts).
+  app.delete("/internal/data/:key", async (req, res) => {
+    const version = Number(req.header("x-version"));
+    if (!Number.isFinite(version)) {
+      res.status(400).json({ error: "x-version header required" });
       return;
     }
-    const entry = { value: req.body, version };
-    data.set(req.params.key, entry);
-    await persist();
-    if (onWrite) await onWrite(req.params.key, entry);
-    res.json({ ok: true, applied: true, version });
+    res.json(await apply(req.params.key, TOMBSTONE, version));
   });
 
   app.get("/", (_req, res) => res.json({ service: "storage-node", nodeId, shard }));

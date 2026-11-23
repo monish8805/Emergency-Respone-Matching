@@ -23,7 +23,7 @@ Browser ─► Web UI (TanStack Start, :3000)
 | **Request Service** (3005) | Public REST API. Validates with Zod (locations, sizes, idempotency keys), stores via the coordinator, publishes match jobs to RabbitMQ. |
 | **Matching Service** | Consumes match jobs, claims resources atomically, and periodically re-queues requests that are still `PENDING`. |
 | **Coordinator** (3006) | Routes every key to `hash(key) mod 3`, replicates each write to the shard's three nodes and needs a majority (2 of 3) to acknowledge it, serializes changes per key, offers compare-and-set, tracks heartbeats and reconciles recovered nodes. Internal: bound to localhost in Compose, ClusterIP-only in Kubernetes. Kubernetes runs two with leader election (one active). |
-| **Storage nodes** | 3 shards × 3 nodes. Versioned key-value store with optional on-disk persistence. |
+| **Storage nodes** | 3 shards × 3 nodes. Versioned key-value store with optional persistence: on disk (`DATA_DIR`) or in MongoDB (`MONGODB_URI`). |
 | **RabbitMQ** | Durable queue `match.requests`, delayed retry queue `match.retry`, dead-letter queue `match.requests.dlq`. |
 
 ### Locations and matching
@@ -37,6 +37,10 @@ A location is either a **zone name** (`Zone A`) or **coordinates** (`12.97, 77.5
 ### How data is keyed
 
 Requests are stored as `request:<uuid>`. Resources are stored as `resource:<type>:<uuid>`, and a resource id is `<type>-<uuid>` (for example `water-9f3a…`), so the type is part of the key and an id alone is enough to find it. Listing takes a key prefix and each storage node applies it itself, so the matcher asks for `resource:water:` and receives only water resources instead of every record on every shard. (The resource list in the UI asks for all types.) Data written with the older `resource:<uuid>` keys is not found by the new code: reset the volumes (`docker compose down -v`, or delete the namespace on Kubernetes) after upgrading.
+
+### Deleting data
+
+`DELETE /internal/data/:key` on the coordinator (internal, not exposed by the Request Service) removes a key with the same quorum rules as a write: `200` when a majority accepted it, `404` if the key does not exist or is already deleted, `503` if the shard has lost its quorum. A delete writes a **tombstone** one version above the current value instead of erasing the key. Otherwise a node that was down during the delete would bring the old value back when it recovers and is reconciled. Reads treat a tombstone as missing, listings skip it, and the key can be created again afterwards. Tombstones are never purged, which is fine for a demo but would need a cleanup job in production.
 
 ### Status rules
 
@@ -53,7 +57,8 @@ If a resource that is serving a request is set to `AVAILABLE` or `UNAVAILABLE`, 
 - **Pagination.** `GET /requests` and `GET /resources` return `{ items, nextCursor, total }`. Use `?limit=` (1-200, default 50) and pass `nextCursor` back as `?cursor=`. Requests are newest first, resources are ordered by id, and `GET /resources?type=water` lists one type. Cursors name the last record seen, so rows added between pages are never skipped or repeated. The UI shows 25 per page and polls only the page on screen.
 - **Input checks.** A location must be valid coordinates (`-90..90`, `-180..180`) or a zone name: starts with a letter, letters/digits/spaces and `. ' _ -`, at most 60 characters. `91, 10`, `123` or `!!!` are rejected with `400`. Optionally set `ZONES="Zone A,Zone B"` on the request service to accept only those zones (plus coordinates), which is the only way to refuse a plausible but unknown name like `asdf`. Bodies are capped at 100 KB (`413 request body too large (limit 100 KB)`); malformed JSON gets `400 malformed request body`.
 - **Recovery without stale reads.** A node that comes back is `syncing`: it receives new writes but serves no reads until it has been reconciled with its peer. Reconciliation runs per key under that key's lock and the higher version wins in both directions, so an old copy can never overwrite a newer write.
-- **Durability.** With `DATA_DIR` set (Compose volumes / Kubernetes PVCs) each node persists its data, so even losing both nodes of a shard at once loses nothing.
+- **Durability.** With `DATA_DIR` set (Compose volumes / Kubernetes PVCs) each node persists its data to a local file, so even losing both nodes of a shard at once loses nothing.
+- **Optional MongoDB Atlas persistence.** Set `MONGODB_URI` (and optionally `MONGODB_DB`, default `emergency`) and every storage node saves its entries to MongoDB instead of a file, one collection per shard (`shard_0`, `shard_1`, `shard_2`), with each node's copy told apart by a `nodeId` field. MongoDB takes priority over `DATA_DIR` when both are set, and without `MONGODB_URI` nothing changes. The nodes' `/health` shows `backend: "mongodb"`. In Compose, put `MONGODB_URI=...` in a `.env` file (never commit it). On Kubernetes run `kubectl -n emergency create secret generic mongodb-credentials --from-literal=uri='mongodb+srv://...'` before deploying; the secret is optional. Allow your machine's or cluster's IP in the Atlas network access list.
 - **Reliable messaging.** Publishes wait for broker confirms and reconnect after broker restarts. Failed jobs go to a delayed retry queue (5 attempts) then the dead-letter queue. If a publish fails, the request stays `PENDING` and the matcher's sweeper re-queues it, so nothing is stuck. Connecting and confirming are time-limited and heartbeats are on, so a broker outage never makes the API hang: it answers at once with `x-match-queued: false`. The sweeper only re-queues requests a free resource could actually serve, so unmatchable requests cost nothing.
 
 ## Run with Docker Compose
